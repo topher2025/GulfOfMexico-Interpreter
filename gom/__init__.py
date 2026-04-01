@@ -1,21 +1,14 @@
-"""
-Gulf of Mexico Environment Facade.
-
-This module provides the primary interface to the temporal engine, re-exporting
-all core components for seamless integration.
-"""
-
+from gom.runtime.engine import RealityDistortionField
 from gom.runtime.types import MutabilityFlavor, LifetimeUnit
 from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
 from gom.stdlib.collections import GOMArray
-from gom.runtime.engine import RealityDistortionField
 
 __all__ = [
+    'RealityDistortionField',
     'MutabilityFlavor',
     'LifetimeUnit',
     'TemporalAnchor',
     'TimelinePoint',
     'VariableTimeline',
     'GOMArray',
-    'RealityDistortionField'
 ]
