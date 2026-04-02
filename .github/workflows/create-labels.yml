@@ -1,0 +1,60 @@
+name: Create Issue Labels
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/create-labels.yml'
+
+jobs:
+  create-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = [
+              // Module / file labels
+              { name: "lexer.py",       color: "bfd4f2", description: "Related to the lexer module" },
+              { name: "parser.py",      color: "bfd4f2", description: "Related to the parser module" },
+              { name: "nodes.py",       color: "bfd4f2", description: "Related to AST node definitions" },
+              { name: "executor.py",    color: "bfd4f2", description: "Related to the executor module" },
+              { name: "environment.py", color: "bfd4f2", description: "Related to the environment module" },
+              { name: "main.py",        color: "bfd4f2", description: "Related to the CLI entry point" },
+              { name: "compiler.py",    color: "f9d0c4", description: "Related to the compiler module" },
+              { name: "cdb.py",         color: "f9d0c4", description: "Related to the .cdb tools module" },
+              { name: "util",           color: "e1e4e8", description: "Related to utility helpers" },
+              { name: "io.py",          color: "c2e0c6", description: "Related to built-in I/O functions" },
+              { name: "tests",          color: "fef2c0", description: "Related to tests" },
+              { name: "docs",           color: "e8c8f8", description: "Related to documentation" },
+            ];
+
+            for (const label of labels) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                  color: label.color,
+                  description: label.description,
+                });
+                console.log(`Created label: ${label.name}`);
+              } catch (err) {
+                if (err.status === 422) {
+                  // Label already exists — update it instead
+                  await github.rest.issues.updateLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: label.name,
+                    color: label.color,
+                    description: label.description,
+                  });
+                  console.log(`Updated label: ${label.name}`);
+                } else {
+                  throw err;
+                }
+              }
+            }
