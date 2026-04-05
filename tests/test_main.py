@@ -1,9 +1,12 @@
 """Tests for main.py arg_parser()."""
 
+import os
 import sys
 import pytest
 
-sys.path.insert(0, "/home/runner/work/GulfOfMexico-Interpreter/GulfOfMexico-Interpreter")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from main import arg_parser
 
@@ -76,10 +79,10 @@ class TestRunSubcommand:
         assert args.dump_env is True
 
     def test_run_prints_args(self, capsys):
-        _parse(["run", "hello.gom"], capsys)
-        out = capsys.readouterr().out  # any lingering output
-        # arg_parser() prints args; just ensure no crash and output exists
-        # (The helper already consumed stdout; this is a no-op but explicit)
+        _, out = _parse(["run", "hello.gom"], capsys)
+        # arg_parser() prints the Namespace; verify output is non-empty and
+        # contains the file argument.
+        assert "hello.gom" in out
 
     def test_run_returns_namespace(self, capsys):
         import argparse
