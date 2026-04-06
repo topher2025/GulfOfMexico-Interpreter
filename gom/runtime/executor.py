@@ -275,6 +275,8 @@ class GOMExecutor:
         """
         # 25 % tariff: randomly discard the import entirely
         if random.random() < 0.25:
+            if self.rdf.debug:
+                print(f"[TARIFF] Import of '{stmt.name}' was lost (25 % tariff)")
             return
         # 25 % slower: brief sleep to simulate import overhead
         time.sleep(0.001 * 0.25)

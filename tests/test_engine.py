@@ -967,7 +967,8 @@ class TestNewNodes:
     def test_index_expr(self):
         from gom.parsing.nodes import IndexExpr
         e = IndexExpr(VariableExpr("arr"), LiteralExpr(-1))
-        assert e.attribute if hasattr(e, "attribute") else True  # just checking construction
+        assert e.target == VariableExpr("arr")
+        assert e.index == LiteralExpr(-1)
 
     def test_attribute_expr(self):
         from gom.parsing.nodes import AttributeExpr

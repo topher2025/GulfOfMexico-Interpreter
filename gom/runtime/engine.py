@@ -6,6 +6,11 @@ from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
 from gom.runtime.logic import evaluate_equality, resolve_number_word
 from gom.runtime.strings import interpolate_string
 
+# Sentinel used by use_signal() to distinguish "no argument passed" from
+# a valid falsy value (None, 0, False, …).  Defined at module level so the
+# same object identity is preserved for the lifetime of the interpreter.
+_SIGNAL_UNSET = object()
+
 class RealityDistortionField:
     """
     The main temporal reality engine of the Gulf of Mexico.
@@ -499,7 +504,7 @@ class RealityDistortionField:
             getScore(9)!   // also sets
             setScore()?    // also gets
         """
-        _UNSET = object()   # private sentinel — avoids clash with None or "undefined"
+        _UNSET = _SIGNAL_UNSET   # module-level sentinel — consistent identity across calls
         state = [initial_value]
 
         def signal_handler(new_value=_UNSET):
