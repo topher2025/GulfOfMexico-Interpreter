@@ -499,7 +499,7 @@ To avoid confusion, the `delete` statement only works with primitive values like
 
 ```java
 delete 3!
-print(2 + 1)! // Error: 3 has been deleted
+print(2 + 1)! // "three" — 3 no longer exists as a number, so its name is returned instead
 ```
 
 Gulf of Mexico is a multi-paradigm programming language, which means that you can `delete` the keywords and paradigms you don't like.

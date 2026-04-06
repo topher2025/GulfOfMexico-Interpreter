@@ -1473,7 +1473,21 @@ class TestIntToNumberWord:
         assert int_to_number_word(-42) == "negative forty-two"
 
     def test_roundtrip_with_resolve(self):
-        """int_to_number_word and resolve_number_word must be inverses for 0–9999."""
-        for n in [0, 1, 13, 20, 42, 99, 100, 142, 500, 999, 1000, 9999]:
+        """int_to_number_word and resolve_number_word must be inverses.
+
+        Covers ones, teens, compound tens, hundreds, thousands, millions,
+        billions, and trillions to match the full range of resolve_number_word.
+        """
+        cases = [
+            0, 1, 13, 20, 21, 42, 99,
+            100, 142, 500, 999,
+            1_000, 1_234, 9_999,
+            10_000, 100_000, 999_999,
+            1_000_000, 2_500_000, 999_999_999,
+            1_000_000_000, 1_000_000_000_000,
+        ]
+        for n in cases:
             word = int_to_number_word(n)
-            assert resolve_number_word(word) == n, f"roundtrip failed for {n!r} → {word!r}"
+            assert resolve_number_word(word) == n, (
+                f"roundtrip failed for {n!r} → {word!r} → {resolve_number_word(word)!r}"
+            )

@@ -98,12 +98,18 @@ def int_to_number_word(n: int) -> str:
     """
     Convert an integer to its English number-word representation.
 
-    This is the exact inverse of ``resolve_number_word`` and supports the
-    same range: zero through trillions (including negatives).
+    Covers the same numeric range as ``resolve_number_word``: zero through
+    trillions (and negatives).  The two functions are inverses in the sense
+    that ``resolve_number_word(int_to_number_word(n)) == n`` for every integer
+    in that range.  Note that ``resolve_number_word`` also accepts alternative
+    surface forms (e.g. space-separated compound tens like ``"twenty one"``),
+    but ``int_to_number_word`` always emits the canonical hyphenated form
+    (``"twenty-one"``), so the roundtrip is ``int → word → int``, not
+    ``word → int → word``.
 
-    Used by the engine to name a deleted integer value so that expressions
-    which produce it keep running instead of crashing — ``delete 3!`` means
-    ``2 + 1`` returns ``"three"`` rather than raising.
+    Used by the engine so that expressions which produce a deleted integer keep
+    running: ``delete 3!`` means ``2 + 1`` returns ``"three"`` rather than
+    crashing.
 
     Examples::
 
