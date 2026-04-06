@@ -7,7 +7,7 @@ all core components for seamless integration.
 
 from gom.runtime.types import MutabilityFlavor, LifetimeUnit
 from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
-from gom.stdlib.collections import GOMArray
+from gom.stdlib.collections import GOMArray, GOMObject
 from gom.runtime.engine import RealityDistortionField
 from gom.runtime.executor import GOMExecutor
 
@@ -18,6 +18,7 @@ __all__ = [
     'TimelinePoint',
     'VariableTimeline',
     'GOMArray',
+    'GOMObject',
     'RealityDistortionField',
     'GOMExecutor',
 ]

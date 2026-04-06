@@ -1250,3 +1250,143 @@ class TestExecutorNewFeatures:
                         MutabilityFlavor.CONST_CONST),
         ])
         assert rdf.get_variable("r") is True
+
+
+# ── Framework-completion fixes ────────────────────────────────────────────────
+
+class TestDeleteLawOnExpressions:
+    """
+    Per spec: ``delete 3!`` → ``print(2 + 1)! // Error: 3 has been deleted``
+
+    Any expression that *produces* a deleted value must raise, not just variable
+    lookups at declaration time.
+    """
+
+    def _run(self, stmts):
+        rdf = fresh()
+        GOMExecutor(rdf).execute_program(stmts)
+        return rdf
+
+    def test_deleted_literal_in_arithmetic_raises(self):
+        with pytest.raises(RuntimeError, match="3.*deleted"):
+            self._run([
+                DeleteStmt(LiteralExpr(3)),
+                DeclareStmt("r", ArithmeticExpr(LiteralExpr(2), '+', LiteralExpr(1)),
+                            MutabilityFlavor.CONST_CONST),
+            ])
+
+    def test_deleted_string_value_raises(self):
+        with pytest.raises(RuntimeError, match="'hello'.*deleted"):
+            self._run([
+                DeleteStmt(LiteralExpr("hello")),
+                PrintStmt(LiteralExpr("hello")),
+            ])
+
+    def test_non_deleted_value_is_fine(self):
+        rdf = self._run([
+            DeleteStmt(LiteralExpr(3)),
+            DeclareStmt("r", LiteralExpr(4), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == 4
+
+    def test_deleted_boolean_raises(self):
+        with pytest.raises(RuntimeError, match="True.*deleted"):
+            self._run([
+                DeleteStmt(LiteralExpr(True)),
+                PrintStmt(LiteralExpr(True)),
+            ])
+
+    def test_unhashable_value_not_crashed(self):
+        """Deleting a list value (unhashable) should not crash the engine."""
+        rdf = self._run([
+            DeclareStmt("x", LiteralExpr(5), MutabilityFlavor.VAR_VAR),
+        ])
+        # unhashable entity — delete_entity silently skips it
+        rdf.delete_entity([1, 2, 3])
+        assert rdf.get_variable("x") == 5
+
+
+class TestNextKeywordLocalScope:
+    """_get_next_from_timeline must find future values in local scope frames."""
+
+    def test_next_finds_local_future_value(self):
+        """Inside a function scope, ``next x`` should see the future local assignment."""
+        from gom.parsing.nodes import FunctionDeclStmt, ReturnStmt
+        rdf = fresh()
+        # Manually push a scope and pre-populate a future timeline point
+        rdf.push_scope()
+        rdf.declare_variable("x", 5, MutabilityFlavor.VAR_VAR)
+        # Simulate a future assignment by advancing the line counter
+        saved_line = rdf.current_line
+        rdf.current_line = 99
+        rdf.set_variable("x", 99)
+        rdf.current_line = saved_line
+        # next x from line 0 should see the point at line 99
+        future_val = rdf._get_next_from_timeline("x")
+        assert future_val == 99
+        rdf.pop_scope()
+
+    def test_next_returns_none_when_no_future_exists(self):
+        rdf = fresh()
+        rdf.push_scope()
+        rdf.declare_variable("y", 7, MutabilityFlavor.VAR_VAR)
+        # No future point — should return None
+        assert rdf._get_next_from_timeline("y") is None
+        rdf.pop_scope()
+
+
+class TestEnvironmentFacade:
+    """environment.py must export all public framework components."""
+
+    def test_gomobject_exported(self):
+        from gom.environment import GOMObject
+        obj = GOMObject({"a": 1})
+        assert obj.a == 1
+
+    def test_all_exports_present(self):
+        import gom.environment as env
+        for name in [
+            "MutabilityFlavor", "LifetimeUnit",
+            "TemporalAnchor", "TimelinePoint", "VariableTimeline",
+            "GOMArray", "GOMObject",
+            "RealityDistortionField", "GOMExecutor",
+        ]:
+            assert hasattr(env, name), f"environment.py is missing export: {name}"
+
+
+class TestDebugReality:
+    """debug_reality must display local scope variables without crashing."""
+
+    def test_debug_reality_runs_without_error(self, capsys):
+        rdf = fresh()
+        rdf.declare_variable("x", 42, MutabilityFlavor.VAR_VAR)
+        rdf.debug_reality()
+        out = capsys.readouterr().out
+        assert "REALITY DEBUG DUMP" in out
+        assert "x" in out
+
+    def test_debug_reality_shows_local_scopes(self, capsys):
+        rdf = fresh()
+        rdf.push_scope()
+        rdf.declare_variable("local_val", 99, MutabilityFlavor.VAR_VAR)
+        rdf.debug_reality()
+        out = capsys.readouterr().out
+        assert "local_val" in out
+        assert "Local Scope" in out
+        rdf.pop_scope()
+
+    def test_debug_reality_no_local_scopes_no_frame_section(self, capsys):
+        rdf = fresh()
+        rdf.debug_reality()
+        out = capsys.readouterr().out
+        assert "Local Scope" not in out
+
+
+class TestDeadCodeRemoved:
+    """_assign_timeline must no longer exist (it was dead code)."""
+
+    def test_assign_timeline_removed(self):
+        rdf = fresh()
+        assert not hasattr(rdf, "_assign_timeline"), (
+            "_assign_timeline is dead code and should have been removed"
+        )

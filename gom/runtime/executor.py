@@ -285,6 +285,22 @@ class GOMExecutor:
 
     def _eval(self, expr: Any) -> Any:
         """Recursively evaluate an expression node and return its value."""
+        result = self._eval_inner(expr)
+        # Per spec: ``delete 3!`` removes '3' from reality; any subsequent
+        # expression that *produces* the value 3 (e.g. ``2 + 1``) must raise.
+        self._check_not_deleted(result)
+        return result
+
+    def _check_not_deleted(self, value: Any) -> None:
+        """Raise if *value* has been deleted from reality."""
+        try:
+            if value in self.rdf.deleted_entities:
+                raise RuntimeError(f"Error: {value!r} has been deleted from reality")
+        except TypeError:
+            pass  # unhashable values (lists, dicts) cannot be individually deleted
+
+    def _eval_inner(self, expr: Any) -> Any:
+        """Core expression evaluation without the deleted-entity post-check."""
         if isinstance(expr, LiteralExpr):
             return expr.value
 

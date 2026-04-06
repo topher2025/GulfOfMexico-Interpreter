@@ -94,16 +94,6 @@ class RealityDistortionField:
                 return frame[name]
         return self.timelines.get(name)
 
-    def _assign_timeline(self, name: str, timeline: "VariableTimeline") -> None:
-        """
-        Store a timeline in the innermost scope if inside a function call,
-        otherwise in the global namespace.
-        """
-        if self._local_scopes:
-            self._local_scopes[-1][name] = timeline
-        else:
-            self.timelines[name] = timeline
-
     # ── Function registry ──────────────────────────────────────────────────────
 
     def declare_function(
@@ -377,13 +367,16 @@ class RealityDistortionField:
     def _get_next_from_timeline(self, name: str) -> Optional[Any]:
         """
         Look ahead in the timeline for the nearest future manifestation of *name*.
+
+        Searches local scope frames (innermost first) then global timelines.
         Returns the value of the earliest point with an anchor line number greater
         than the current line, or None if none exists.
         """
-        if name not in self.timelines:
+        tl = self._resolve_timeline(name)
+        if tl is None:
             return None
         future_points = [
-            p for p in self.timelines[name].timeline_points
+            p for p in tl.timeline_points
             if p.anchor.line_number > self.current_line
         ]
         if future_points:
@@ -622,12 +615,23 @@ class RealityDistortionField:
         print(f"Deleted Entities: {self.deleted_entities}")
         print(f"Global Immutables: {list(self.GLOBAL_IMMUTABLES.keys())}")
         print(f"\nActive Timelines: {len(self.timelines)}")
-        
+
         for name, timeline in self.timelines.items():
             current = timeline.get_at_time(self.current_line, self.current_timestamp)
             if current:
-                print(f"  • {name} = {current.value} ({current.mutability.value})")
+                print(f"  • {name} = {current.value!r} ({current.mutability.value})")
             else:
                 print(f"  • {name} = [EXPIRED] 💀")
-        
+
+        if self._local_scopes:
+            print(f"\nLocal Scope Frames: {len(self._local_scopes)}")
+            for depth, frame in enumerate(self._local_scopes):
+                print(f"  Frame {depth} (innermost = {depth == len(self._local_scopes) - 1}):")
+                for name, timeline in frame.items():
+                    current = timeline.get_at_time(self.current_line, self.current_timestamp)
+                    if current:
+                        print(f"    • {name} = {current.value!r} ({current.mutability.value})")
+                    else:
+                        print(f"    • {name} = [EXPIRED] 💀")
+
         print("="*70 + "\n")
