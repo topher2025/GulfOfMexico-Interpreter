@@ -368,7 +368,10 @@ class RealityDistortionField:
         """
         Look ahead in the timeline for the nearest future manifestation of *name*.
 
-        Searches local scope frames (innermost first) then global timelines.
+        Uses ``_resolve_timeline`` to search local scope frames (innermost first)
+        before falling back to global timelines — matching the same scope-resolution
+        order used by all other variable-lookup operations.
+
         Returns the value of the earliest point with an anchor line number greater
         than the current line, or None if none exists.
         """

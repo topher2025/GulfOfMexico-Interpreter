@@ -1390,3 +1390,27 @@ class TestDeadCodeRemoved:
         assert not hasattr(rdf, "_assign_timeline"), (
             "_assign_timeline is dead code and should have been removed"
         )
+
+    def test_declare_variable_scope_aware_replaces_assign_timeline(self):
+        """
+        Verify that ``declare_variable`` correctly stores declarations in the
+        innermost local scope when inside a function — which is the
+        functionality that ``_assign_timeline`` was intended to provide.
+        """
+        rdf = fresh()
+        # Global declaration
+        rdf.declare_variable("x", 1, MutabilityFlavor.VAR_VAR)
+
+        # Push a scope and declare a shadowing 'x' locally
+        rdf.push_scope()
+        rdf.declare_variable("x", 99, MutabilityFlavor.VAR_VAR)
+
+        # Inside the scope 'x' resolves to the local shadow
+        assert rdf.get_variable("x") == 99
+
+        # After popping, the global 'x' is visible again
+        rdf.pop_scope()
+        assert rdf.get_variable("x") == 1
+
+        # The inner declaration must NOT have written to the global timeline
+        assert rdf.timelines["x"].get_at_time(rdf.current_line, rdf.current_timestamp).value == 1
