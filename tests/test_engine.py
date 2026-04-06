@@ -9,7 +9,10 @@ import pytest
 
 from gom.runtime.engine import RealityDistortionField
 from gom.runtime.executor import GOMExecutor
-from gom.runtime.logic import evaluate_equality, resolve_number_word, int_to_number_word
+from gom.runtime.logic import (
+    evaluate_equality, resolve_number_word, int_to_number_word,
+    _illion_name, _parse_illion,
+)
 from gom.runtime.strings import interpolate_string
 from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
 from gom.runtime.types import MutabilityFlavor, LifetimeUnit
@@ -1468,6 +1471,19 @@ class TestIntToNumberWord:
     def test_trillions(self):
         assert int_to_number_word(1_000_000_000_000) == "one trillion"
 
+    def test_large_illions(self):
+        """Beyond trillion, names are generated programmatically."""
+        assert int_to_number_word(10 ** 15) == "one quadrillion"
+        assert int_to_number_word(10 ** 18) == "one quintillion"
+        assert int_to_number_word(10 ** 21) == "one sextillion"
+        assert int_to_number_word(10 ** 24) == "one septillion"
+        assert int_to_number_word(10 ** 27) == "one octillion"
+        assert int_to_number_word(10 ** 30) == "one nonillion"
+        assert int_to_number_word(10 ** 33) == "one decillion"
+        assert int_to_number_word(10 ** 36) == "one undecillion"
+        assert int_to_number_word(10 ** 63) == "one vigintillion"
+        assert int_to_number_word(10 ** 303) == "one centillion"
+
     def test_negative(self):
         assert int_to_number_word(-5) == "negative five"
         assert int_to_number_word(-42) == "negative forty-two"
@@ -1475,8 +1491,9 @@ class TestIntToNumberWord:
     def test_roundtrip_with_resolve(self):
         """int_to_number_word and resolve_number_word must be inverses.
 
-        Covers ones, teens, compound tens, hundreds, thousands, millions,
-        billions, and trillions to match the full range of resolve_number_word.
+        Covers ones, teens, compound tens, hundreds, thousands, small illions
+        (million–nonillion), and programmatically generated CW illion names
+        (decillion, vigintillion, centillion).
         """
         cases = [
             0, 1, 13, 20, 21, 42, 99,
@@ -1485,9 +1502,104 @@ class TestIntToNumberWord:
             10_000, 100_000, 999_999,
             1_000_000, 2_500_000, 999_999_999,
             1_000_000_000, 1_000_000_000_000,
+            # beyond trillion
+            10 ** 15,   # quadrillion
+            10 ** 18,   # quintillion
+            10 ** 33,   # decillion
+            10 ** 63,   # vigintillion
+            10 ** 303,  # centillion
         ]
         for n in cases:
             word = int_to_number_word(n)
             assert resolve_number_word(word) == n, (
                 f"roundtrip failed for {n!r} → {word!r} → {resolve_number_word(word)!r}"
+            )
+
+class TestIllionName:
+    """Tests for the _illion_name / _parse_illion helpers and their interaction
+    with resolve_number_word for magnitudes beyond trillion."""
+
+    # ── _illion_name ──────────────────────────────────────────────────────────
+
+    def test_small_illions(self):
+        assert _illion_name(1) == "million"
+        assert _illion_name(2) == "billion"
+        assert _illion_name(3) == "trillion"
+        assert _illion_name(4) == "quadrillion"
+        assert _illion_name(5) == "quintillion"
+        assert _illion_name(6) == "sextillion"
+        assert _illion_name(7) == "septillion"
+        assert _illion_name(8) == "octillion"
+        assert _illion_name(9) == "nonillion"
+
+    def test_cw_tens(self):
+        assert _illion_name(10) == "decillion"
+        assert _illion_name(11) == "undecillion"
+        assert _illion_name(12) == "duodecillion"
+        assert _illion_name(20) == "vigintillion"
+        assert _illion_name(21) == "unvigintillion"
+        assert _illion_name(30) == "trigintillion"
+        assert _illion_name(90) == "nonagintillion"
+        assert _illion_name(99) == "novemnonagintillion"
+
+    def test_cw_hundreds(self):
+        assert _illion_name(100) == "centillion"
+        assert _illion_name(101) == "uncentillion"
+        assert _illion_name(200) == "ducentillion"
+        assert _illion_name(300) == "trecentillion"
+        # n=103: "tre"→"tres" before "cent" to avoid collision with n=300
+        assert _illion_name(103) == "trescentillion"
+        assert _illion_name(999) == "novemnonagintnongentillion"
+
+    def test_invalid_n_zero(self):
+        import pytest
+        with pytest.raises(ValueError):
+            _illion_name(0)
+
+    def test_invalid_n_too_large(self):
+        import pytest
+        with pytest.raises(ValueError):
+            _illion_name(1000)
+
+    # ── _parse_illion ─────────────────────────────────────────────────────────
+
+    def test_parse_small_illions(self):
+        assert _parse_illion("million")     == 10 ** 6
+        assert _parse_illion("billion")     == 10 ** 9
+        assert _parse_illion("trillion")    == 10 ** 12
+        assert _parse_illion("quadrillion") == 10 ** 15
+        assert _parse_illion("nonillion")   == 10 ** 30
+
+    def test_parse_cw_illions(self):
+        assert _parse_illion("decillion")        == 10 ** 33
+        assert _parse_illion("undecillion")      == 10 ** 36
+        assert _parse_illion("vigintillion")     == 10 ** 63
+        assert _parse_illion("centillion")       == 10 ** 303
+
+    def test_parse_unknown_returns_none(self):
+        assert _parse_illion("foo")      is None
+        assert _parse_illion("illion")   is None
+        assert _parse_illion("thousand") is None
+        assert _parse_illion("")         is None
+
+    # ── resolve_number_word integration ───────────────────────────────────────
+
+    def test_resolve_quadrillion(self):
+        assert resolve_number_word("one quadrillion") == 10 ** 15
+
+    def test_resolve_decillion(self):
+        assert resolve_number_word("one decillion") == 10 ** 33
+
+    def test_resolve_compound_large(self):
+        """Compound: two decillion three nonillion."""
+        expected = 2 * 10 ** 33 + 3 * 10 ** 30
+        assert resolve_number_word("two decillion three nonillion") == expected
+
+    def test_roundtrip_cw_names(self):
+        """_illion_name roundtrips back through _parse_illion for n=10..110."""
+        for n in range(10, 111):
+            name = _illion_name(n)
+            value = _parse_illion(name)
+            assert value == 1000 ** (n + 1), (
+                f"roundtrip failed for n={n}: {name!r} → {value!r}"
             )
