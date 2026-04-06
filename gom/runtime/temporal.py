@@ -75,7 +75,10 @@ class TimelinePoint:
         return current_line >= self.anchor.line_number
     
     def __repr__(self):
-        status = "PERSISTENT" if not self.lifetime_unit else f"{self.lifetime_value} {self.lifetime_unit.value}"
+        if self.lifetime_unit is None:
+            status = "PERSISTENT"
+        else:
+            status = f"{self.lifetime_value} {self.lifetime_unit.value}"
         return f"TimelinePoint(value={self.value!r}, priority={self.exclamation_priority}, life={status})"
 
 

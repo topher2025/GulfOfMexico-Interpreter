@@ -84,7 +84,6 @@ class RealityDistortionField:
 
     def __enter__(self):
         """RDF activation within a reality scope."""
-        """RDF activation within a reality scope."""
         if self.debug:
             print("🌌 Reality initialized...")
         return self
