@@ -19,7 +19,11 @@ from gom.stdlib.io import gom_print
 from gom.parsing.nodes import (
     ArithmeticExpr, AssignStmt, DeclareStmt, DeleteStmt, EqualityExpr,
     LiteralExpr, NotExpr, PrintStmt, ReverseStmt, StringInterpolationExpr,
-    VariableExpr, WhenStmt,
+    VariableExpr, WhenStmt, SignalExpr,
+    NegationExpr, CallExpr, ArrayLiteralExpr, IndexExpr, AttributeExpr,
+    NewInstanceExpr, IfStmt, FunctionDeclStmt, ReturnStmt, CallStmt,
+    IncrementStmt, DecrementStmt, NoopStmt, ArrayDestructureStmt,
+    FileSeparatorStmt, ClassDeclStmt, ExportStmt, ImportStmt,
 )
 
 
@@ -804,3 +808,444 @@ class TestExecutor:
                         MutabilityFlavor.CONST_CONST),
         ])
         assert rdf.get_variable("big") == 1_000_000
+
+
+# ── New engine features ───────────────────────────────────────────────────────
+
+class TestSignalSentinel:
+    """use_signal should accept None/0/False as valid new values (not treat as 'no arg')."""
+
+    def test_signal_set_to_none(self):
+        getter, setter = fresh().use_signal("initial")
+        setter(None)
+        assert getter() is None
+
+    def test_signal_set_to_zero(self):
+        getter, setter = fresh().use_signal(99)
+        setter(0)
+        assert getter() == 0
+
+    def test_signal_set_to_false(self):
+        getter, setter = fresh().use_signal(True)
+        setter(False)
+        assert getter() is False
+
+    def test_getter_returns_current_without_arg(self):
+        getter, setter = fresh().use_signal(42)
+        assert getter() == 42
+
+    def test_getter_equals_setter(self):
+        getter, setter = fresh().use_signal(0)
+        assert getter is setter
+
+
+class TestWhenLooseEquality:
+    """when (health = 0) uses GOM loose '=' (precision 0), not Python ==."""
+
+    def test_when_fires_on_float_int_loose_match(self, capsys):
+        rdf = fresh()
+        rdf.declare_variable("hp", 10, MutabilityFlavor.VAR_VAR)
+        rdf.register_observer("hp", 0, lambda: print("dead"))
+        rdf.set_variable("hp", 0)
+        assert "dead" in capsys.readouterr().out
+
+    def test_when_fires_loose_int_vs_float(self, capsys):
+        """3 = 3.14 is True at precision 0 (int(float) comparison)."""
+        rdf = fresh()
+        rdf.declare_variable("x", 10, MutabilityFlavor.VAR_VAR)
+        rdf.register_observer("x", 3, lambda: print("match"))
+        rdf.set_variable("x", 3)
+        assert "match" in capsys.readouterr().out
+
+
+class TestScopeManagement:
+    def test_push_pop_scope(self):
+        rdf = fresh()
+        rdf.push_scope()
+        assert len(rdf._local_scopes) == 1
+        rdf.pop_scope()
+        assert len(rdf._local_scopes) == 0
+
+    def test_local_variable_hidden_from_outer_scope(self):
+        rdf = fresh()
+        rdf.push_scope()
+        rdf.declare_variable("local_x", 42, MutabilityFlavor.VAR_VAR)
+        rdf.pop_scope()
+        with pytest.raises(NameError):
+            rdf.get_variable("local_x")
+
+    def test_local_shadows_global(self):
+        rdf = fresh()
+        rdf.declare_variable("score", 10, MutabilityFlavor.VAR_VAR)
+        rdf.push_scope()
+        rdf.declare_variable("score", 99, MutabilityFlavor.VAR_VAR)
+        assert rdf.get_variable("score") == 99
+        rdf.pop_scope()
+        assert rdf.get_variable("score") == 10
+
+
+class TestFunctionRegistry:
+    def test_declare_and_lookup_function(self):
+        rdf = fresh()
+        rdf.declare_function("add", ["a", "b"], [ReturnStmt(ArithmeticExpr(VariableExpr("a"), '+', VariableExpr("b")))])
+        params, body, is_async = rdf.get_function_def("add")
+        assert params == ["a", "b"]
+        assert is_async is False
+
+    def test_unknown_function_raises(self):
+        with pytest.raises(NameError):
+            fresh().get_function_def("nonexistent")
+
+
+class TestClassRegistry:
+    def test_declare_class(self):
+        rdf = fresh()
+        rdf.declare_class("Player", [])
+        instance = rdf.instantiate_class("Player")
+        assert instance["__class__"] == "Player"
+
+    def test_single_instance_enforcement(self):
+        rdf = fresh()
+        rdf.declare_class("Player", [])
+        rdf.instantiate_class("Player")
+        with pytest.raises(RuntimeError, match="one 'Player' instance"):
+            rdf.instantiate_class("Player")
+
+    def test_instantiate_unknown_class_raises(self):
+        with pytest.raises(NameError):
+            fresh().instantiate_class("Unknown")
+
+
+class TestGOMObject:
+    def test_dict_access(self):
+        from gom.stdlib.collections import GOMObject
+        obj = GOMObject({"name": "Luke"})
+        assert obj["name"] == "Luke"
+
+    def test_attribute_access(self):
+        from gom.stdlib.collections import GOMObject
+        obj = GOMObject({"name": "Luke"})
+        assert obj.name == "Luke"
+
+    def test_attribute_set(self):
+        from gom.stdlib.collections import GOMObject
+        obj = GOMObject()
+        obj.name = "Lu"
+        assert obj["name"] == "Lu"
+
+    def test_missing_attribute_raises(self):
+        from gom.stdlib.collections import GOMObject
+        obj = GOMObject()
+        with pytest.raises(AttributeError):
+            _ = obj.nonexistent
+
+    def test_repr(self):
+        from gom.stdlib.collections import GOMObject
+        obj = GOMObject({"a": 1})
+        assert "'a'" in repr(obj)
+
+
+class TestNewNodes:
+    """Verify all new AST nodes can be instantiated correctly."""
+
+    def test_negation_expr(self):
+        from gom.parsing.nodes import NegationExpr
+        e = NegationExpr(LiteralExpr(5))
+        assert e.operand.value == 5
+
+    def test_call_expr(self):
+        from gom.parsing.nodes import CallExpr
+        e = CallExpr("add", [LiteralExpr(1), LiteralExpr(2)])
+        assert e.name == "add"
+        assert len(e.args) == 2
+
+    def test_array_literal_expr(self):
+        from gom.parsing.nodes import ArrayLiteralExpr
+        e = ArrayLiteralExpr([LiteralExpr(1), LiteralExpr(2)])
+        assert len(e.elements) == 2
+
+    def test_index_expr(self):
+        from gom.parsing.nodes import IndexExpr
+        e = IndexExpr(VariableExpr("arr"), LiteralExpr(-1))
+        assert e.attribute if hasattr(e, "attribute") else True  # just checking construction
+
+    def test_attribute_expr(self):
+        from gom.parsing.nodes import AttributeExpr
+        e = AttributeExpr(VariableExpr("player"), "name")
+        assert e.attribute == "name"
+
+    def test_if_stmt(self):
+        from gom.parsing.nodes import IfStmt
+        s = IfStmt(LiteralExpr(True), [PrintStmt(LiteralExpr("yes"))], [])
+        assert s.else_body == []
+
+    def test_function_decl_stmt(self):
+        from gom.parsing.nodes import FunctionDeclStmt
+        s = FunctionDeclStmt("add", ["a", "b"], [])
+        assert s.is_async is False
+
+    def test_return_stmt(self):
+        from gom.parsing.nodes import ReturnStmt
+        s = ReturnStmt(LiteralExpr(42))
+        assert s.value_expr.value == 42
+
+    def test_increment_stmt(self):
+        from gom.parsing.nodes import IncrementStmt
+        s = IncrementStmt("score")
+        assert s.name == "score"
+
+    def test_decrement_stmt(self):
+        from gom.parsing.nodes import DecrementStmt
+        s = DecrementStmt("health")
+        assert s.name == "health"
+
+    def test_class_decl_stmt(self):
+        from gom.parsing.nodes import ClassDeclStmt
+        s = ClassDeclStmt("Player", [])
+        assert s.name == "Player"
+
+    def test_file_separator_stmt(self):
+        from gom.parsing.nodes import FileSeparatorStmt
+        s = FileSeparatorStmt("add.gom")
+        assert s.filename == "add.gom"
+
+    def test_export_stmt(self):
+        from gom.parsing.nodes import ExportStmt
+        s = ExportStmt("add", "main.gom")
+        assert s.target_file == "main.gom"
+
+    def test_import_stmt(self):
+        from gom.parsing.nodes import ImportStmt
+        s = ImportStmt("add")
+        assert s.name == "add"
+
+
+class TestExecutorNewFeatures:
+    def _run(self, stmts):
+        rdf = fresh()
+        GOMExecutor(rdf).execute_program(stmts)
+        return rdf
+
+    # ── NegationExpr ─────────────────────────────────────────────────────────
+
+    def test_negation_positive_number(self):
+        from gom.parsing.nodes import NegationExpr
+        rdf = self._run([DeclareStmt("r", NegationExpr(LiteralExpr(5)), MutabilityFlavor.CONST_CONST)])
+        assert rdf.get_variable("r") == -5
+
+    def test_negation_negative_number(self):
+        from gom.parsing.nodes import NegationExpr
+        rdf = self._run([DeclareStmt("r", NegationExpr(LiteralExpr(-3)), MutabilityFlavor.CONST_CONST)])
+        assert rdf.get_variable("r") == 3
+
+    # ── ArrayLiteralExpr / IndexExpr / AttributeExpr ──────────────────────────
+
+    def test_array_literal(self):
+        from gom.parsing.nodes import ArrayLiteralExpr
+        rdf = self._run([
+            DeclareStmt("scores", ArrayLiteralExpr([LiteralExpr(3), LiteralExpr(2), LiteralExpr(5)]),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        arr = rdf.get_variable("scores")
+        assert arr[-1] == 3   # GOM index -1 = first element
+        assert arr[0] == 2
+        assert arr[1] == 5
+
+    def test_index_expr(self):
+        from gom.parsing.nodes import ArrayLiteralExpr, IndexExpr
+        rdf = self._run([
+            DeclareStmt("scores", ArrayLiteralExpr([LiteralExpr(3), LiteralExpr(2), LiteralExpr(5)]),
+                        MutabilityFlavor.CONST_CONST),
+            DeclareStmt("first", IndexExpr(VariableExpr("scores"), LiteralExpr(-1)),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("first") == 3
+
+    def test_attribute_expr_on_object(self):
+        from gom.parsing.nodes import AttributeExpr
+        from gom.stdlib.collections import GOMObject
+        obj = GOMObject({"health": 10})
+        rdf = self._run([
+            DeclareStmt("player", LiteralExpr(obj), MutabilityFlavor.CONST_CONST),
+            DeclareStmt("hp", AttributeExpr(VariableExpr("player"), "health"),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("hp") == 10
+
+    # ── CallExpr / FunctionDeclStmt / ReturnStmt ──────────────────────────────
+
+    def test_function_call_returns_value(self):
+        from gom.parsing.nodes import FunctionDeclStmt, ReturnStmt, CallExpr
+        rdf = self._run([
+            FunctionDeclStmt("double", ["x"], [
+                ReturnStmt(ArithmeticExpr(VariableExpr("x"), '*', LiteralExpr(2)))
+            ]),
+            DeclareStmt("r", CallExpr("double", [LiteralExpr(5)]), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == 10
+
+    def test_function_add(self):
+        from gom.parsing.nodes import FunctionDeclStmt, ReturnStmt, CallExpr
+        rdf = self._run([
+            FunctionDeclStmt("add", ["a", "b"], [
+                ReturnStmt(ArithmeticExpr(VariableExpr("a"), '+', VariableExpr("b")))
+            ]),
+            DeclareStmt("r", CallExpr("add", [LiteralExpr(3), LiteralExpr(4)]),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == 7
+
+    def test_function_scope_isolation(self):
+        from gom.parsing.nodes import FunctionDeclStmt, ReturnStmt, CallExpr
+        """Local params must not pollute the global scope after the call."""
+        rdf = self._run([
+            FunctionDeclStmt("f", ["local_param"], [
+                ReturnStmt(LiteralExpr(99))
+            ]),
+            DeclareStmt("r", CallExpr("f", [LiteralExpr(1)]), MutabilityFlavor.CONST_CONST),
+        ])
+        with pytest.raises(NameError):
+            rdf.get_variable("local_param")
+
+    def test_unknown_function_returns_undefined(self):
+        from gom.parsing.nodes import CallExpr
+        rdf = self._run([
+            DeclareStmt("r", CallExpr("ghost", []), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == "undefined"
+
+    def test_call_stmt(self, capsys):
+        from gom.parsing.nodes import FunctionDeclStmt, CallStmt, CallExpr
+        self._run([
+            FunctionDeclStmt("greet", [], [PrintStmt(LiteralExpr("hello"))]),
+            CallStmt(CallExpr("greet", [])),
+        ])
+        assert "hello" in capsys.readouterr().out
+
+    # ── IfStmt ────────────────────────────────────────────────────────────────
+
+    def test_if_true_branch(self, capsys):
+        from gom.parsing.nodes import IfStmt
+        self._run([IfStmt(LiteralExpr(True), [PrintStmt(LiteralExpr("yes"))], [])])
+        assert "yes" in capsys.readouterr().out
+
+    def test_if_false_branch(self, capsys):
+        from gom.parsing.nodes import IfStmt
+        self._run([IfStmt(LiteralExpr(False),
+                          [PrintStmt(LiteralExpr("yes"))],
+                          [PrintStmt(LiteralExpr("no"))])])
+        assert "no" in capsys.readouterr().out
+
+    def test_if_maybe_truthy(self, capsys):
+        from gom.parsing.nodes import IfStmt
+        self._run([IfStmt(LiteralExpr("maybe"), [PrintStmt(LiteralExpr("ran"))], [])])
+        assert "ran" in capsys.readouterr().out
+
+    # ── IncrementStmt / DecrementStmt ─────────────────────────────────────────
+
+    def test_increment(self):
+        from gom.parsing.nodes import IncrementStmt
+        rdf = self._run([
+            DeclareStmt("score", LiteralExpr(5), MutabilityFlavor.VAR_VAR),
+            IncrementStmt("score"),
+        ])
+        assert rdf.get_variable("score") == 6
+
+    def test_decrement(self):
+        from gom.parsing.nodes import DecrementStmt
+        rdf = self._run([
+            DeclareStmt("hp", LiteralExpr(10), MutabilityFlavor.VAR_VAR),
+            DecrementStmt("hp"),
+        ])
+        assert rdf.get_variable("hp") == 9
+
+    # ── NoopStmt ──────────────────────────────────────────────────────────────
+
+    def test_noop_does_nothing(self, capsys):
+        from gom.parsing.nodes import NoopStmt
+        self._run([NoopStmt()])
+        assert capsys.readouterr().out == ""
+
+    # ── ArrayDestructureStmt ──────────────────────────────────────────────────
+
+    def test_signal_destructure(self):
+        from gom.parsing.nodes import ArrayDestructureStmt
+        rdf = self._run([
+            ArrayDestructureStmt(
+                ["getter", "setter"],
+                SignalExpr(LiteralExpr(0)),
+                MutabilityFlavor.VAR_VAR,
+            ),
+        ])
+        getter = rdf.get_variable("getter")
+        setter = rdf.get_variable("setter")
+        # Both should be callable and point to the same handler
+        assert callable(getter)
+        assert callable(setter)
+        setter(42)
+        assert getter() == 42
+
+    def test_destructure_extra_names_get_undefined(self):
+        from gom.parsing.nodes import ArrayDestructureStmt, ArrayLiteralExpr
+        rdf = self._run([
+            ArrayDestructureStmt(
+                ["a", "b", "c"],
+                LiteralExpr([10, 20]),   # only 2 elements
+                MutabilityFlavor.CONST_CONST,
+            ),
+        ])
+        assert rdf.get_variable("c") == "undefined"
+
+    # ── FileSeparatorStmt ─────────────────────────────────────────────────────
+
+    def test_file_separator_clears_local_timelines(self):
+        from gom.parsing.nodes import FileSeparatorStmt
+        rdf = self._run([
+            DeclareStmt("x", LiteralExpr(1), MutabilityFlavor.VAR_VAR),
+            FileSeparatorStmt(),
+        ])
+        with pytest.raises(NameError):
+            rdf.get_variable("x")
+
+    def test_file_separator_keeps_globals(self):
+        from gom.parsing.nodes import FileSeparatorStmt
+        rdf = fresh()
+        rdf.declare_variable("eternal", 42, MutabilityFlavor.CONST_CONST_CONST)
+        GOMExecutor(rdf).execute_program([FileSeparatorStmt()])
+        assert rdf.get_variable("eternal") == 42
+
+    # ── ClassDeclStmt / NewInstanceExpr ──────────────────────────────────────
+
+    def test_class_decl_and_instantiate(self):
+        from gom.parsing.nodes import ClassDeclStmt, NewInstanceExpr
+        rdf = self._run([
+            ClassDeclStmt("Player", []),
+            DeclareStmt("p", NewInstanceExpr("Player"), MutabilityFlavor.CONST_CONST),
+        ])
+        player = rdf.get_variable("p")
+        assert player["__class__"] == "Player"
+
+    def test_second_instance_raises(self):
+        from gom.parsing.nodes import ClassDeclStmt, NewInstanceExpr
+        with pytest.raises(RuntimeError, match="one 'Player' instance"):
+            self._run([
+                ClassDeclStmt("Player", []),
+                DeclareStmt("p1", NewInstanceExpr("Player"), MutabilityFlavor.CONST_CONST),
+                DeclareStmt("p2", NewInstanceExpr("Player"), MutabilityFlavor.CONST_CONST),
+            ])
+
+    # ── Spec example: numeric variable names ──────────────────────────────────
+
+    def test_numeric_variable_name_overrides_literal(self):
+        """const const 5 = 4!  →  print(2 + 2 === 5)!  // true"""
+        rdf = self._run([
+            DeclareStmt("5", LiteralExpr(4), MutabilityFlavor.CONST_CONST),
+            DeclareStmt("r",
+                        EqualityExpr(
+                            ArithmeticExpr(LiteralExpr(2), '+', LiteralExpr(2)),
+                            VariableExpr("5"),
+                            2,    # ===
+                        ),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") is True

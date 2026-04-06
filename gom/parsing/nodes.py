@@ -169,3 +169,204 @@ class ShiftTimeStmt:
     """
     offset_expr: Any    # Expr (numeric, milliseconds)
     exclamation_count: int = 1
+
+
+# ── Additional expression nodes ───────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class NegationExpr:
+    """Unary negation: ``-x``."""
+    operand: Any    # Expr
+
+
+@dataclass(frozen=True)
+class CallExpr:
+    """
+    A function call expression: ``add(3, 2)``.
+
+    Per spec, parentheses are optional and are replaced by whitespace.
+    The parser resolves this; the executor looks up the name in the RDF
+    function registry.
+    """
+    name: str
+    args: List[Any]     # List[Expr]
+
+
+@dataclass(frozen=True)
+class ArrayLiteralExpr:
+    """An array literal: ``[3, 2, 5]``."""
+    elements: List[Any]     # List[Expr]
+
+
+@dataclass(frozen=True)
+class IndexExpr:
+    """Array/object index access: ``scores[-1]``."""
+    target: Any     # Expr — evaluates to a GOMArray or GOMObject
+    index: Any      # Expr
+
+
+@dataclass(frozen=True)
+class AttributeExpr:
+    """Object property access: ``player.name``."""
+    target: Any     # Expr — evaluates to a GOMObject or similar
+    attribute: str
+
+
+@dataclass(frozen=True)
+class NewInstanceExpr:
+    """
+    Class instantiation: ``new Player()``.
+
+    Per spec only one instance per class is allowed; the RDF enforces this.
+    """
+    class_name: str
+    args: List[Any] = field(default_factory=list)  # List[Expr]
+
+
+# ── Additional statement nodes ────────────────────────────────────────────────
+
+@dataclass
+class IfStmt:
+    """
+    ``if (condition) { then_body } else { else_body }``
+
+    ``else_body`` may be an empty list when there is no else branch.
+    """
+    condition: Any          # Expr
+    then_body: List[Any]    # List[Stmt]
+    else_body: List[Any]    # List[Stmt] — empty list when absent
+    exclamation_count: int = 1
+
+
+@dataclass
+class FunctionDeclStmt:
+    """
+    A function declaration using any permitted keyword variant:
+    ``function``, ``func``, ``fun``, ``fn``, ``functi``, ``f``.
+
+    Arrow-expression bodies are stored as a single ``ReturnStmt`` wrapping
+    the expression (the parser normalises both forms).
+    """
+    name: str
+    params: List[str]       # positional parameter names
+    body: List[Any]         # List[Stmt]
+    is_async: bool = False
+    exclamation_count: int = 1
+
+
+@dataclass
+class ReturnStmt:
+    """``return expr!`` — exits the current function with a value."""
+    value_expr: Any         # Expr; may be LiteralExpr(None) for bare return
+    exclamation_count: int = 1
+
+
+@dataclass
+class CallStmt:
+    """
+    A function call used as a statement (for side effects).
+
+    Wraps a ``CallExpr``; the return value is discarded.
+    """
+    call_expr: Any          # CallExpr
+    exclamation_count: int = 1
+    debug_mode: bool = False
+
+
+@dataclass
+class IncrementStmt:
+    """
+    ``score++!`` — increments a numeric variable by one.
+
+    Equivalent to ``score = score + 1`` but expresses intentional counting.
+    """
+    name: str
+    exclamation_count: int = 1
+
+
+@dataclass
+class DecrementStmt:
+    """
+    ``score--!`` — decrements a numeric variable by one.
+
+    Equivalent to ``score = score - 1``.
+    """
+    name: str
+    exclamation_count: int = 1
+
+
+@dataclass
+class NoopStmt:
+    """
+    ``noop!`` — intentional no-operation.
+
+    In async contexts this causes the coroutine to yield its turn so the
+    other coroutine can advance two lines.
+    """
+    exclamation_count: int = 1
+
+
+@dataclass
+class ArrayDestructureStmt:
+    """
+    ``const var [getter, setter] = use(0)!``
+
+    Binds each name in ``names`` to the corresponding element from the
+    iterable produced by ``value_expr``.
+    """
+    names: List[str]
+    value_expr: Any         # Expr — must evaluate to an iterable
+    mutability: MutabilityFlavor
+    exclamation_count: int = 1
+    debug_mode: bool = False
+
+
+@dataclass
+class FileSeparatorStmt:
+    """
+    ``=====`` or ``======= name.gom =======``
+
+    Marks the boundary between logical files inside a single ``.gom`` source.
+    When executed, clears all non-global local timelines (resetting scope to
+    only const-const-const globals).
+    """
+    filename: Optional[str] = None  # None when no name is given
+    exclamation_count: int = 0      # separators have no terminator
+
+
+@dataclass
+class ClassDeclStmt:
+    """
+    ``class Player { body }`` or ``className Player { body }``
+
+    Per spec, only one instance of each class may exist in the reality.
+    """
+    name: str
+    body: List[Any]         # List[DeclareStmt | FunctionDeclStmt]
+    exclamation_count: int = 1
+
+
+@dataclass
+class ExportStmt:
+    """
+    ``export name to "file.gom"!``
+
+    Makes ``name`` available for import in the target file.
+    """
+    name: str
+    target_file: str
+    exclamation_count: int = 1
+
+
+@dataclass
+class ImportStmt:
+    """
+    ``import name!``
+
+    Imports ``name`` from whichever file exported it.
+
+    **Per spec:** Imported code runs 25 % slower and, at random, 25 % of
+    imported lines are silently discarded (tariff simulation).
+    """
+    name: str
+    exclamation_count: int = 1

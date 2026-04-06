@@ -62,3 +62,35 @@ class GOMArray(list):
 
     def __repr__(self):
         return f"GOMArray({super().__repr__()})"
+
+
+class GOMObject(dict):
+    """
+    Gulf of Mexico Object: a key-value manifestation.
+
+    Supports attribute-style access (``obj.key``) in addition to standard
+    dict access (``obj["key"]``), matching the spec's object property notation::
+
+        const const player = { name: "Lu" }!
+        print("Hello {player$name}!")!      // Hello Lu!
+
+    Per spec:
+    - Objects are created as ``{}`` literals.
+    - Property access uses ``object.property`` or the escudo separator
+      ``{object$property}`` in string interpolation.
+    - ``const var`` objects can have their properties mutated (``const var``
+      means the *binding* is const, the *value* is mutable).
+    """
+
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"GOMObject has no property '{name}'")
+
+    def __setattr__(self, name: str, value):
+        self[name] = value
+
+    def __repr__(self):
+        items = ", ".join(f"{k!r}: {v!r}" for k, v in self.items())
+        return f"{{{items}}}"

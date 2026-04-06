@@ -51,9 +51,118 @@ class RealityDistortionField:
         
         # Track deleted primitives and keywords
         self.deleted_entities = set()
+
+        # ── Scope stack ─────────────────────────────────────────────────────
+        # Each frame is a dict[name → VariableTimeline] representing local
+        # variables for a function invocation.  The innermost frame is checked
+        # first; global timelines (self.timelines) are the outermost scope.
+        self._local_scopes: List[Dict[str, "VariableTimeline"]] = []
+
+        # ── Function registry ────────────────────────────────────────────────
+        # Maps function name → (params, body_stmts, is_async)
+        self._functions: Dict[str, Any] = {}
+
+        # ── Class registry ───────────────────────────────────────────────────
+        # Maps class name → (body_stmts,)
+        self._classes: Dict[str, Any] = {}
+        # Tracks which classes have already been instantiated (single-instance rule)
+        self._class_instances: Dict[str, Any] = {}
         
         # Manifest standard constants into the RDF
         self._manifest_constants()
+
+    # ── Scope helpers ─────────────────────────────────────────────────────────
+
+    def push_scope(self) -> None:
+        """Open a new local variable scope (called at the start of a function body)."""
+        self._local_scopes.append({})
+
+    def pop_scope(self) -> None:
+        """Close the innermost local scope (called when a function returns)."""
+        if self._local_scopes:
+            self._local_scopes.pop()
+
+    def _resolve_timeline(self, name: str) -> Optional["VariableTimeline"]:
+        """Search for a timeline by name from innermost scope to global."""
+        for frame in reversed(self._local_scopes):
+            if name in frame:
+                return frame[name]
+        return self.timelines.get(name)
+
+    def _assign_timeline(self, name: str, timeline: "VariableTimeline") -> None:
+        """
+        Store a timeline in the innermost scope if inside a function call,
+        otherwise in the global namespace.
+        """
+        if self._local_scopes:
+            self._local_scopes[-1][name] = timeline
+        else:
+            self.timelines[name] = timeline
+
+    # ── Function registry ──────────────────────────────────────────────────────
+
+    def declare_function(
+        self,
+        name: str,
+        params: List[str],
+        body: Any,           # List[Stmt] or a single expression-stmt
+        is_async: bool = False,
+    ) -> None:
+        """
+        Register a function definition in the reality engine.
+
+        The body is an opaque list of AST statement nodes; the executor is
+        responsible for evaluating it when the function is called.
+        """
+        self._functions[name] = (params, body, is_async)
+        if self.debug:
+            print(f"📐 Function '{name}' manifested with params {params}")
+
+    def get_function_def(self, name: str) -> Any:
+        """
+        Retrieve a registered function definition.
+
+        Returns a ``(params, body, is_async)`` tuple, or raises ``NameError``
+        if the function has not been declared.
+        """
+        if name not in self._functions:
+            raise NameError(f"Function '{name}' has not been manifested in this reality")
+        return self._functions[name]
+
+    # ── Class registry ─────────────────────────────────────────────────────────
+
+    def declare_class(self, name: str, body: Any) -> None:
+        """
+        Register a class definition.
+
+        Per spec, each class can only ever have one instance.  The body is an
+        opaque list of AST nodes; the executor processes it when instantiating.
+        """
+        self._classes[name] = body
+        if self.debug:
+            print(f"🏛  Class '{name}' registered in the cosmic registry")
+
+    def instantiate_class(self, class_name: str) -> Any:
+        """
+        Create an instance of a class — enforcing the single-instance rule.
+
+        Raises ``RuntimeError`` if a second instance would be created.
+        Returns the existing instance object (a ``GOMObject``).
+        """
+        if class_name not in self._classes:
+            raise NameError(f"Class '{class_name}' has not been defined")
+        if class_name in self._class_instances:
+            raise RuntimeError(
+                f"Error: Can't have more than one '{class_name}' instance!"
+            )
+        # Import here to avoid circular import at module level
+        from gom.stdlib.collections import GOMObject
+        instance = GOMObject()
+        instance["__class__"] = class_name
+        self._class_instances[class_name] = instance
+        if self.debug:
+            print(f"🏛  '{class_name}' instantiated (only instance in this reality)")
+        return instance
 
     def _manifest_constants(self):
         """Initialize the sacred constants required for any stable reality."""
@@ -177,10 +286,21 @@ class RealityDistortionField:
         if lifetime_unit == LifetimeUnit.NEGATIVE_LINES:
             self.temporal_anomalies.append((name, point))
         
-        if name not in self.timelines:
-            self.timelines[name] = VariableTimeline(name)
+        # Store in the innermost local scope if inside a function, else global.
+        # We always *declare* into the current scope (creating a shadow if a
+        # global with the same name exists) so that local variables are properly
+        # isolated from the outer reality.
+        if self._local_scopes:
+            frame = self._local_scopes[-1]
+            if name not in frame:
+                frame[name] = VariableTimeline(name)
+            tl = frame[name]
+        else:
+            if name not in self.timelines:
+                self.timelines[name] = VariableTimeline(name)
+            tl = self.timelines[name]
         
-        self.timelines[name].add_point(point)
+        tl.add_point(point)
         
         # Check mutation observers for 'when' keyword
         self._check_mutation_observers(name, value)
@@ -218,7 +338,8 @@ class RealityDistortionField:
             if temporal_mode == "current":
                 return point.value
         
-        if name not in self.timelines:
+        tl = self._resolve_timeline(name)
+        if tl is None:
             # Check global manifestations
             if name in self.GLOBAL_IMMUTABLES:
                 return self.GLOBAL_IMMUTABLES[name]
@@ -228,7 +349,7 @@ class RealityDistortionField:
                 return number_value
             raise NameError(f"Manifestation '{name}' does not exist in this reality frame")
         
-        timeline = self.timelines[name]
+        timeline = tl
         
         if temporal_mode == "current":
             point = timeline.get_at_time(self.current_line, self.current_timestamp)
@@ -310,10 +431,9 @@ class RealityDistortionField:
         if name in self.GLOBAL_IMMUTABLES:
             raise RuntimeError(f"Cannot reassign eternal manifestation '{name}'")
 
-        if name not in self.timelines:
+        timeline = self._resolve_timeline(name)
+        if timeline is None:
             raise NameError(f"Cannot reassign undefined handle '{name}'")
-        
-        timeline = self.timelines[name]
         current_point = timeline.get_at_time(self.current_line, self.current_timestamp)
         
         if current_point is None:
@@ -347,12 +467,14 @@ class RealityDistortionField:
         self._check_mutation_observers(name, value)
     
     def _check_mutation_observers(self, name: str, value: Any):
-        """Verify if any 'when' observers are triggered by this manifestation shift."""
+        """Verify if any 'when' observers are triggered by this manifestation shift.
+        
+        Per spec, ``when (health = 0)`` uses the single-equals loose equality
+        operator (GOM precision 0), not Python identity or strict equality.
+        """
         if name in self.mutation_observers:
             for target_val, callback in self.mutation_observers[name]:
-                # GOM equality for 'when' is usually loose (= or ==)
-                # For this rough draft engine, we use loose Python equality
-                if value == target_val:
+                if evaluate_equality(value, target_val, 0):
                     callback()
 
     def register_observer(self, name: str, target_value: Any, callback: Callable):
@@ -366,19 +488,29 @@ class RealityDistortionField:
     def use_signal(self, initial_value: Any) -> Tuple[Callable, Callable]:
         """
         The 'use' keyword - creates a signal getter/setter pair.
+
+        Per spec, getter and setter are the *same* function:
+        - Called with no arguments → returns current value
+        - Called with any single argument → sets and returns the new value
+
+        Both elements of the returned tuple point to the same handler, so::
+
+            const var [getScore, setScore] = use(0)!
+            getScore(9)!   // also sets
+            setScore()?    // also gets
         """
-        # Internal state for the signal
+        _UNSET = object()   # private sentinel — avoids clash with None or "undefined"
         state = [initial_value]
-        
-        def signal_handler(new_value=None):
-            if new_value is not None:
+
+        def signal_handler(new_value=_UNSET):
+            if new_value is not _UNSET:
                 state[0] = new_value
                 if self.debug:
                     print(f"📡 Signal mutated: {new_value!r}")
                 return new_value
             return state[0]
-            
-        # Returning a pair that points to the same handler (as per spec)
+
+        # Both getter and setter point to the same handler (per spec)
         return signal_handler, signal_handler
     
     def mutate_variable(self, name: str, operation: Callable):
@@ -392,10 +524,9 @@ class RealityDistortionField:
         if name in self.GLOBAL_IMMUTABLES:
             raise RuntimeError(f"Cannot mutate eternal manifestation '{name}'")
 
-        if name not in self.timelines:
+        timeline = self._resolve_timeline(name)
+        if timeline is None:
             raise NameError(f"Cannot mutate undefined manifestation '{name}'")
-        
-        timeline = self.timelines[name]
         current_point = timeline.get_at_time(self.current_line, self.current_timestamp)
         
         if current_point is None:
@@ -432,10 +563,18 @@ class RealityDistortionField:
 
         # Deleting a handle (e.g. 'class', 'print', or a variable name)
         if isinstance(entity, str):
-             if entity in self.timelines:
-                 del self.timelines[entity]
-             if entity in self.GLOBAL_IMMUTABLES:
-                 del self.GLOBAL_IMMUTABLES[entity]
+            # Search scope frames as well as global timelines
+            deleted_from_scope = False
+            for frame in reversed(self._local_scopes):
+                if entity in frame:
+                    del frame[entity]
+                    deleted_from_scope = True
+                    break
+            if not deleted_from_scope:
+                if entity in self.timelines:
+                    del self.timelines[entity]
+            if entity in self.GLOBAL_IMMUTABLES:
+                del self.GLOBAL_IMMUTABLES[entity]
         
         try:
             self.deleted_entities.add(entity)
