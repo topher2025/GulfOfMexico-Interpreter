@@ -86,8 +86,9 @@ def _illion_name(n: int) -> str:
     ones = n % 10
     if hundreds > 9:
         raise ValueError(f"_illion_name: n={n!r} is out of range (max 999)")
-    # "tre" (ones=3) becomes "tres" before a hundreds component to avoid the
-    # "trecent" (hundreds=3) collision.
+    # "tre" (ones=3) becomes "tres" when followed by a hundreds component to
+    # avoid collision with the hundreds=3 prefix "trecent" (n=300 → "trecentillion"
+    # vs n=103 → "trescentillion").
     ones_str = _CW_ONES[ones]
     if ones == 3 and hundreds > 0:
         ones_str = 'tres'
@@ -116,11 +117,12 @@ def _decode_cw_prefix(prefix: str) -> Optional[int]:
             tens = i
             remaining = remaining[:-len(_CW_TENS[i])]
             break
-    # Finally ones — what's left must be an exact ones entry (or "tres") or empty
+    # Finally ones — what's left must be an exact ones entry (or "tres") or empty.
+    # "tres" is the hundreds-boundary form of ones=3 (see _illion_name); accept it
+    # unconditionally here and let the n >= 10 guard at the end reject bare cases.
     ones = 0
     if remaining:
-        # "tres" is the hundreds-boundary form of ones=3 (see _illion_name)
-        if remaining == 'tres' and hundreds > 0:
+        if remaining == 'tres':
             ones = 3
         else:
             for i in range(len(_CW_ONES) - 1, 0, -1):

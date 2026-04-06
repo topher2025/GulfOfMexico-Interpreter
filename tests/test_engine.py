@@ -1546,8 +1546,9 @@ class TestIllionName:
         assert _illion_name(100) == "centillion"
         assert _illion_name(101) == "uncentillion"
         assert _illion_name(200) == "ducentillion"
-        assert _illion_name(300) == "trecentillion"
-        # n=103: "tre"→"tres" before "cent" to avoid collision with n=300
+        assert _illion_name(300) == "trecentillion"   # hundreds=3 → "trecent"
+        # n=103: ones=3 (tre→tres) + hundreds=1 (cent) → "trescentillion"
+        # (distinct from n=300 which uses the hundreds=3 prefix "trecent")
         assert _illion_name(103) == "trescentillion"
         assert _illion_name(999) == "novemnonagintnongentillion"
 
@@ -1596,8 +1597,8 @@ class TestIllionName:
         assert resolve_number_word("two decillion three nonillion") == expected
 
     def test_roundtrip_cw_names(self):
-        """_illion_name roundtrips back through _parse_illion for n=10..110."""
-        for n in range(10, 111):
+        """_illion_name roundtrips back through _parse_illion for n=10..999."""
+        for n in range(10, 1000):
             name = _illion_name(n)
             value = _parse_illion(name)
             assert value == 1000 ** (n + 1), (
