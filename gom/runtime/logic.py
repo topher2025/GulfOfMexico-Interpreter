@@ -80,6 +80,73 @@ def resolve_number_word(name: str) -> Optional[int]:
     return total + current
 
 
+# ── Number-to-word conversion ─────────────────────────────────────────────────
+
+_ONES_WORDS: List[str] = [
+    '', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+    'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+    'seventeen', 'eighteen', 'nineteen',
+]
+
+_TENS_WORDS: List[str] = [
+    '', '', 'twenty', 'thirty', 'forty', 'fifty',
+    'sixty', 'seventy', 'eighty', 'ninety',
+]
+
+
+def int_to_number_word(n: int) -> str:
+    """
+    Convert an integer to its English number-word representation.
+
+    This is the exact inverse of ``resolve_number_word`` and supports the
+    same range: zero through trillions (including negatives).
+
+    Used by the engine to name a deleted integer value so that expressions
+    which produce it keep running instead of crashing — ``delete 3!`` means
+    ``2 + 1`` returns ``"three"`` rather than raising.
+
+    Examples::
+
+        int_to_number_word(0)          # "zero"
+        int_to_number_word(3)          # "three"
+        int_to_number_word(42)         # "forty-two"
+        int_to_number_word(100)        # "one hundred"
+        int_to_number_word(1_000)      # "one thousand"
+        int_to_number_word(-5)         # "negative five"
+    """
+    if n < 0:
+        return "negative " + int_to_number_word(-n)
+    if n == 0:
+        return "zero"
+
+    def _below_thousand(num: int) -> str:
+        if num == 0:
+            return ""
+        if num < 20:
+            return _ONES_WORDS[num]
+        if num < 100:
+            tens_part = _TENS_WORDS[num // 10]
+            ones_part = _ONES_WORDS[num % 10]
+            return tens_part + ("-" + ones_part if ones_part else "")
+        hundreds_part = _ONES_WORDS[num // 100] + " hundred"
+        remainder = _below_thousand(num % 100)
+        return (hundreds_part + " " + remainder).strip() if remainder else hundreds_part
+
+    parts: List[str] = []
+    for magnitude, label in [
+        (1_000_000_000_000, "trillion"),
+        (1_000_000_000,     "billion"),
+        (1_000_000,         "million"),
+        (1_000,             "thousand"),
+    ]:
+        if n >= magnitude:
+            parts.append(_below_thousand(n // magnitude) + " " + label)
+            n %= magnitude
+    if n > 0:
+        parts.append(_below_thousand(n))
+    return " ".join(parts)
+
+
 def normalize_gom_type(val: Any) -> Any:
     """
     Normalize GOM values into comparable forms based on type alias laws.

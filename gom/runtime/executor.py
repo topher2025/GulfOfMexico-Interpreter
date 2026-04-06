@@ -287,17 +287,29 @@ class GOMExecutor:
         """Recursively evaluate an expression node and return its value."""
         result = self._eval_inner(expr)
         # Per spec: ``delete 3!`` removes '3' from reality; any subsequent
-        # expression that *produces* the value 3 (e.g. ``2 + 1``) must raise.
-        self._check_not_deleted(result)
-        return result
+        # expression that *produces* 3 (e.g. ``2 + 1``) receives the English
+        # word for it ("three") so execution keeps running.
+        return self._replace_if_deleted(result)
 
-    def _check_not_deleted(self, value: Any) -> None:
-        """Raise if *value* has been deleted from reality."""
+    def _replace_if_deleted(self, value: Any) -> Any:
+        """
+        Soft-replace a deleted value so execution keeps running.
+
+        - Deleted ``int`` → English word (``3`` → ``"three"``)
+        - Any other deleted type → ``"undefined"``
+        - Non-deleted value → returned unchanged
+        """
         try:
-            if value in self.rdf.deleted_entities:
-                raise RuntimeError(f"Error: {value!r} has been deleted from reality")
+            if value not in self.rdf.deleted_entities:
+                return value
         except TypeError:
-            pass  # unhashable values (lists, dicts) cannot be individually deleted
+            return value  # unhashable — not in deleted_entities, pass through
+        # Integer: return the English word so downstream code can still use it
+        if isinstance(value, int) and not isinstance(value, bool):
+            from gom.runtime.logic import int_to_number_word
+            return int_to_number_word(value)
+        # All other deleted types become "undefined"
+        return self.rdf.UNDEFINED
 
     def _eval_inner(self, expr: Any) -> Any:
         """Core expression evaluation without the deleted-entity post-check."""

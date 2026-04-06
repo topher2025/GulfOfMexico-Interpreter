@@ -9,7 +9,7 @@ import pytest
 
 from gom.runtime.engine import RealityDistortionField
 from gom.runtime.executor import GOMExecutor
-from gom.runtime.logic import evaluate_equality, resolve_number_word
+from gom.runtime.logic import evaluate_equality, resolve_number_word, int_to_number_word
 from gom.runtime.strings import interpolate_string
 from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
 from gom.runtime.types import MutabilityFlavor, LifetimeUnit
@@ -1256,10 +1256,9 @@ class TestExecutorNewFeatures:
 
 class TestDeleteLawOnExpressions:
     """
-    Per spec: ``delete 3!`` → ``print(2 + 1)! // Error: 3 has been deleted``
-
-    Any expression that *produces* a deleted value must raise, not just variable
-    lookups at declaration time.
+    Per spec: ``delete 3!`` removes 3 from reality so expressions that produce
+    it return its English-word name (``"three"``) to keep execution alive.
+    Non-integer deleted values collapse to ``"undefined"``.
     """
 
     def _run(self, stmts):
@@ -1267,20 +1266,38 @@ class TestDeleteLawOnExpressions:
         GOMExecutor(rdf).execute_program(stmts)
         return rdf
 
-    def test_deleted_literal_in_arithmetic_raises(self):
-        with pytest.raises(RuntimeError, match="3.*deleted"):
-            self._run([
-                DeleteStmt(LiteralExpr(3)),
-                DeclareStmt("r", ArithmeticExpr(LiteralExpr(2), '+', LiteralExpr(1)),
-                            MutabilityFlavor.CONST_CONST),
-            ])
+    def test_deleted_int_arithmetic_returns_word(self):
+        """``delete 3!`` → ``2 + 1`` returns ``"three"`` (not a crash)."""
+        rdf = self._run([
+            DeleteStmt(LiteralExpr(3)),
+            DeclareStmt("r", ArithmeticExpr(LiteralExpr(2), '+', LiteralExpr(1)),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == "three"
 
-    def test_deleted_string_value_raises(self):
-        with pytest.raises(RuntimeError, match="'hello'.*deleted"):
-            self._run([
-                DeleteStmt(LiteralExpr("hello")),
-                PrintStmt(LiteralExpr("hello")),
-            ])
+    def test_deleted_int_literal_returns_word(self):
+        """Directly using a deleted integer literal also returns its word form."""
+        rdf = self._run([
+            DeleteStmt(LiteralExpr(7)),
+            DeclareStmt("r", LiteralExpr(7), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == "seven"
+
+    def test_deleted_string_returns_undefined(self):
+        """Deleted strings have no word form, so they collapse to ``"undefined"``."""
+        rdf = self._run([
+            DeleteStmt(LiteralExpr("hello")),
+            DeclareStmt("r", LiteralExpr("hello"), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == "undefined"
+
+    def test_deleted_boolean_returns_undefined(self):
+        """Deleted booleans collapse to ``"undefined"`` (not the word ``"one"``/``"zero"``)."""
+        rdf = self._run([
+            DeleteStmt(LiteralExpr(True)),
+            DeclareStmt("r", LiteralExpr(True), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == "undefined"
 
     def test_non_deleted_value_is_fine(self):
         rdf = self._run([
@@ -1288,13 +1305,6 @@ class TestDeleteLawOnExpressions:
             DeclareStmt("r", LiteralExpr(4), MutabilityFlavor.CONST_CONST),
         ])
         assert rdf.get_variable("r") == 4
-
-    def test_deleted_boolean_raises(self):
-        with pytest.raises(RuntimeError, match="True.*deleted"):
-            self._run([
-                DeleteStmt(LiteralExpr(True)),
-                PrintStmt(LiteralExpr(True)),
-            ])
 
     def test_unhashable_value_not_crashed(self):
         """Deleting a list value (unhashable) should not crash the engine."""
@@ -1414,3 +1424,56 @@ class TestDeadCodeRemoved:
 
         # The inner declaration must NOT have written to the global timeline
         assert rdf.timelines["x"].get_at_time(rdf.current_line, rdf.current_timestamp).value == 1
+
+
+class TestIntToNumberWord:
+    """Unit tests for int_to_number_word — the inverse of resolve_number_word."""
+
+    def test_zero(self):
+        assert int_to_number_word(0) == "zero"
+
+    def test_ones(self):
+        assert int_to_number_word(1) == "one"
+        assert int_to_number_word(3) == "three"
+        assert int_to_number_word(9) == "nine"
+        assert int_to_number_word(19) == "nineteen"
+
+    def test_round_tens(self):
+        assert int_to_number_word(20) == "twenty"
+        assert int_to_number_word(50) == "fifty"
+        assert int_to_number_word(90) == "ninety"
+
+    def test_compound_tens(self):
+        assert int_to_number_word(21) == "twenty-one"
+        assert int_to_number_word(42) == "forty-two"
+        assert int_to_number_word(99) == "ninety-nine"
+
+    def test_hundreds(self):
+        assert int_to_number_word(100) == "one hundred"
+        assert int_to_number_word(200) == "two hundred"
+        assert int_to_number_word(142) == "one hundred forty-two"
+
+    def test_thousands(self):
+        assert int_to_number_word(1_000) == "one thousand"
+        assert int_to_number_word(2_000) == "two thousand"
+        assert int_to_number_word(1_234) == "one thousand two hundred thirty-four"
+
+    def test_millions(self):
+        assert int_to_number_word(1_000_000) == "one million"
+        assert int_to_number_word(2_500_000) == "two million five hundred thousand"
+
+    def test_billions(self):
+        assert int_to_number_word(1_000_000_000) == "one billion"
+
+    def test_trillions(self):
+        assert int_to_number_word(1_000_000_000_000) == "one trillion"
+
+    def test_negative(self):
+        assert int_to_number_word(-5) == "negative five"
+        assert int_to_number_word(-42) == "negative forty-two"
+
+    def test_roundtrip_with_resolve(self):
+        """int_to_number_word and resolve_number_word must be inverses for 0–9999."""
+        for n in [0, 1, 13, 20, 42, 99, 100, 142, 500, 999, 1000, 9999]:
+            word = int_to_number_word(n)
+            assert resolve_number_word(word) == n, f"roundtrip failed for {n!r} → {word!r}"
