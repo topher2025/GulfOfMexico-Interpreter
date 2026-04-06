@@ -56,8 +56,11 @@ class TimelinePoint:
             return True
         
         if self.lifetime_unit == LifetimeUnit.NEGATIVE_LINES:
-            # Variable hoisting: exists before creation, evaporates upon creation
-            return current_line < self.anchor.line_number
+            # Variable hoisting: exists for |lifetime_value| lines before creation.
+            # e.g. anchor=5, lifetime=-1 → alive at line 4 only
+            # e.g. anchor=5, lifetime=-3 → alive at lines 2, 3, 4
+            start = self.anchor.line_number + int(self.lifetime_value or -1)
+            return start <= current_line < self.anchor.line_number
         
         if self.lifetime_unit == LifetimeUnit.LINES:
             # Exists for a fixed number of execution steps
@@ -96,8 +99,13 @@ class VariableTimeline:
         # Higher exclamation count = higher reality priority.
         # Inverted exclamation mark (¡) can be used for negative priority.
         # Secondary sort by line number (descending) to ensure most recent is prioritized.
-        # Stability is preserved for points with identical priority and time.
-        self.timeline_points.sort(key=lambda p: (p.exclamation_priority, p.anchor.line_number), reverse=True)
+        # Tertiary sort by real_time so that multiple assignments on the same line
+        # resolve to the most recently created point (avoids stable-sort ambiguity).
+        # Stability is preserved for points with identical priority, line, and time.
+        self.timeline_points.sort(
+            key=lambda p: (p.exclamation_priority, p.anchor.line_number, p.anchor.real_time),
+            reverse=True,
+        )
     
     def get_at_time(self, line: int, timestamp: float) -> Optional[TimelinePoint]:
         """

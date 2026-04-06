@@ -9,6 +9,7 @@ from gom.runtime.types import MutabilityFlavor, LifetimeUnit
 from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
 from gom.stdlib.collections import GOMArray
 from gom.runtime.engine import RealityDistortionField
+from gom.runtime.executor import GOMExecutor
 
 __all__ = [
     'MutabilityFlavor',
@@ -17,5 +18,6 @@ __all__ = [
     'TimelinePoint',
     'VariableTimeline',
     'GOMArray',
-    'RealityDistortionField'
+    'RealityDistortionField',
+    'GOMExecutor',
 ]

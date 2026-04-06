@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 from collections import defaultdict
 from gom.runtime.types import MutabilityFlavor, LifetimeUnit
 from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
-from gom.runtime.logic import evaluate_equality
+from gom.runtime.logic import evaluate_equality, resolve_number_word
 from gom.runtime.strings import interpolate_string
 
 class RealityDistortionField:
@@ -57,8 +57,6 @@ class RealityDistortionField:
 
     def _manifest_constants(self):
         """Initialize the sacred constants required for any stable reality."""
-        self.declare_variable("one", 1, MutabilityFlavor.CONST_CONST)
-        self.declare_variable("two", 2, MutabilityFlavor.CONST_CONST)
         self.declare_variable("true", True, MutabilityFlavor.CONST_CONST)
         self.declare_variable("false", False, MutabilityFlavor.CONST_CONST)
         # Maybe: stored as 1.5 bits, but manifested as a string for human comfort
@@ -68,8 +66,24 @@ class RealityDistortionField:
         
         # Date.now() support: initialized as a special manifestation
         self.declare_variable("Date.now", self.current_timestamp, MutabilityFlavor.VAR_VAR)
+        # Note: English number words (one, two, three, …, one million, …) are
+        # resolved dynamically by resolve_number_word() in get_variable(), so
+        # they do not need to be pre-declared here.  This means every number
+        # word works out of the box and users can still override them with an
+        # explicit declaration (per the spec's variable-overloading rules).
     
+    @classmethod
+    def clear_globals(cls):
+        """
+        Remove all eternal manifestations from the global registry.
+
+        Intended for use in tests only — in production, eternal constants should
+        never be cleared (that is the whole point of ``const const const``).
+        """
+        cls.GLOBAL_IMMUTABLES.clear()
+
     def __enter__(self):
+        """RDF activation within a reality scope."""
         """RDF activation within a reality scope."""
         if self.debug:
             print("🌌 Reality initialized...")
@@ -194,7 +208,10 @@ class RealityDistortionField:
             return self.current_timestamp
 
         if temporal_mode == "next":
-            # Future-looking operations: register a watcher and block 
+            # First try a pre-scheduled future value already in the timeline.
+            next_val = self._get_next_from_timeline(name)
+            if next_val is not None:
+                return next_val
             return self._await_next_manifestation(name)
 
         # Check temporal anomalies first
@@ -206,6 +223,10 @@ class RealityDistortionField:
             # Check global manifestations
             if name in self.GLOBAL_IMMUTABLES:
                 return self.GLOBAL_IMMUTABLES[name]
+            # Resolve English number words (one, two, twenty-three, one million…)
+            number_value = resolve_number_word(name)
+            if number_value is not None:
+                return number_value
             raise NameError(f"Manifestation '{name}' does not exist in this reality frame")
         
         timeline = self.timelines[name]
@@ -227,6 +248,23 @@ class RealityDistortionField:
         for anomaly_name, point in self.temporal_anomalies:
             if anomaly_name == name and point.is_alive(self.current_line, self.current_timestamp):
                 yield anomaly_name, point
+
+    def _get_next_from_timeline(self, name: str) -> Optional[Any]:
+        """
+        Look ahead in the timeline for the nearest future manifestation of *name*.
+        Returns the value of the earliest point with an anchor line number greater
+        than the current line, or None if none exists.
+        """
+        if name not in self.timelines:
+            return None
+        future_points = [
+            p for p in self.timelines[name].timeline_points
+            if p.anchor.line_number > self.current_line
+        ]
+        if future_points:
+            future_points.sort(key=lambda p: p.anchor.line_number)
+            return future_points[0].value
+        return None
 
     def _await_next_manifestation(self, name: str) -> Any:
         """Logic for the 'next' keyword: blocks until the next manifestation occurs."""
@@ -308,16 +346,6 @@ class RealityDistortionField:
         
         # Trigger observers
         self._check_mutation_observers(name, value)
-        
-        # Check if Date.now was mutated - apply shift to engine
-        if name == "Date.now":
-            try:
-                # Calculate required shift to make engine time match new value
-                self.time_offset = float(value) - (time.time() - self.program_start_time)
-                if self.debug:
-                    print(f"⏰ Clocks synchronized by 'Date.now' shift. New relative time: {self.current_timestamp:.2f}s")
-            except:
-                pass
     
     def _check_mutation_observers(self, name: str, value: Any):
         """Verify if any 'when' observers are triggered by this manifestation shift."""
