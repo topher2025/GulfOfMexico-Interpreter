@@ -1,0 +1,806 @@
+"""
+Tests for the Gulf of Mexico temporal engine.
+
+Covers: types, temporal data structures, RealityDistortionField, number-word
+resolution, GOMArray, equality logic, string interpolation, I/O, AI correction
+passes, and end-to-end executor round-trips.
+"""
+import pytest
+
+from gom.runtime.engine import RealityDistortionField
+from gom.runtime.executor import GOMExecutor
+from gom.runtime.logic import evaluate_equality, resolve_number_word
+from gom.runtime.strings import interpolate_string
+from gom.runtime.temporal import TemporalAnchor, TimelinePoint, VariableTimeline
+from gom.runtime.types import MutabilityFlavor, LifetimeUnit
+from gom.stdlib.ai import aemi, abi, aqmi, ai, apply_all
+from gom.stdlib.collections import GOMArray
+from gom.stdlib.io import gom_print
+from gom.parsing.nodes import (
+    ArithmeticExpr, AssignStmt, DeclareStmt, DeleteStmt, EqualityExpr,
+    LiteralExpr, NotExpr, PrintStmt, ReverseStmt, StringInterpolationExpr,
+    VariableExpr, WhenStmt,
+)
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def clear_globals():
+    """Prevent const-const-const pollution between tests."""
+    RealityDistortionField.clear_globals()
+    yield
+    RealityDistortionField.clear_globals()
+
+
+def fresh() -> RealityDistortionField:
+    return RealityDistortionField()
+
+
+# ── MutabilityFlavor ──────────────────────────────────────────────────────────
+
+class TestMutabilityFlavor:
+    def test_all_five_flavors_exist(self):
+        for flavor in (
+            MutabilityFlavor.CONST_CONST,
+            MutabilityFlavor.CONST_CONST_CONST,
+            MutabilityFlavor.CONST_VAR,
+            MutabilityFlavor.VAR_CONST,
+            MutabilityFlavor.VAR_VAR,
+        ):
+            assert flavor
+
+    def test_const_const_value_string(self):
+        assert MutabilityFlavor.CONST_CONST.value == "const const"
+
+    def test_var_var_value_string(self):
+        assert MutabilityFlavor.VAR_VAR.value == "var var"
+
+
+# ── LifetimeUnit ──────────────────────────────────────────────────────────────
+
+class TestLifetimeUnit:
+    def test_all_units_exist(self):
+        for unit in (
+            LifetimeUnit.LINES,
+            LifetimeUnit.SECONDS,
+            LifetimeUnit.INFINITY,
+            LifetimeUnit.NEGATIVE_LINES,
+        ):
+            assert unit
+
+
+# ── TemporalAnchor ────────────────────────────────────────────────────────────
+
+class TestTemporalAnchor:
+    def test_repr_contains_line(self):
+        anchor = TemporalAnchor(line_number=3, timestamp=1.5, real_time=0.0)
+        assert "line=3" in repr(anchor)
+
+    def test_repr_contains_timestamp(self):
+        anchor = TemporalAnchor(line_number=0, timestamp=2.75, real_time=0.0)
+        assert "2.75s" in repr(anchor)
+
+
+# ── TimelinePoint.is_alive ────────────────────────────────────────────────────
+
+class TestTimelinePointIsAlive:
+    def _point(self, lifetime_value=None, lifetime_unit=None, line=0, ts=0.0):
+        anchor = TemporalAnchor(line_number=line, timestamp=ts, real_time=ts)
+        return TimelinePoint(
+            value="x",
+            anchor=anchor,
+            mutability=MutabilityFlavor.CONST_CONST,
+            lifetime_value=lifetime_value,
+            lifetime_unit=lifetime_unit,
+        )
+
+    def test_standard_alive_from_anchor_line(self):
+        p = self._point(line=2)
+        assert p.is_alive(2, 0.0)
+        assert p.is_alive(100, 0.0)
+
+    def test_standard_not_alive_before_anchor(self):
+        p = self._point(line=2)
+        assert not p.is_alive(1, 0.0)
+
+    def test_infinity_always_alive(self):
+        p = self._point(lifetime_unit=LifetimeUnit.INFINITY)
+        assert p.is_alive(0, 0.0)
+        assert p.is_alive(1_000_000, 0.0)
+
+    def test_lines_alive_within_range(self):
+        p = self._point(lifetime_value=2, lifetime_unit=LifetimeUnit.LINES, line=5)
+        assert p.is_alive(5, 0.0)
+        assert p.is_alive(7, 0.0)
+
+    def test_lines_expired_after_range(self):
+        p = self._point(lifetime_value=2, lifetime_unit=LifetimeUnit.LINES, line=5)
+        assert not p.is_alive(8, 0.0)
+
+    def test_negative_lines_hoisting_one(self):
+        # declared at line 5, <-1> → alive only at line 4
+        p = self._point(lifetime_value=-1, lifetime_unit=LifetimeUnit.NEGATIVE_LINES, line=5)
+        assert p.is_alive(4, 0.0)
+        assert not p.is_alive(3, 0.0)
+        assert not p.is_alive(5, 0.0)
+
+    def test_negative_lines_hoisting_three(self):
+        # declared at line 10, <-3> → alive at lines 7, 8, 9
+        p = self._point(lifetime_value=-3, lifetime_unit=LifetimeUnit.NEGATIVE_LINES, line=10)
+        for ln in (7, 8, 9):
+            assert p.is_alive(ln, 0.0)
+        assert not p.is_alive(6, 0.0)
+        assert not p.is_alive(10, 0.0)
+
+    def test_seconds_alive_within_duration(self):
+        p = self._point(lifetime_value=1.0, lifetime_unit=LifetimeUnit.SECONDS, ts=0.0)
+        assert p.is_alive(0, 0.5)
+        assert p.is_alive(0, 1.0)
+
+    def test_seconds_expired(self):
+        p = self._point(lifetime_value=1.0, lifetime_unit=LifetimeUnit.SECONDS, ts=0.0)
+        assert not p.is_alive(0, 1.001)
+
+
+# ── VariableTimeline ──────────────────────────────────────────────────────────
+
+class TestVariableTimeline:
+    def _make_point(self, value, line, priority=1):
+        anchor = TemporalAnchor(line_number=line, timestamp=0.0, real_time=0.0)
+        return TimelinePoint(
+            value=value,
+            anchor=anchor,
+            mutability=MutabilityFlavor.VAR_VAR,
+            exclamation_priority=priority,
+        )
+
+    def test_highest_priority_wins(self):
+        tl = VariableTimeline("score")
+        tl.add_point(self._make_point("low", line=0, priority=1))
+        tl.add_point(self._make_point("high", line=0, priority=2))
+        assert tl.get_at_time(0, 0.0).value == "high"
+
+    def test_get_previous_returns_second_active(self):
+        tl = VariableTimeline("score")
+        tl.add_point(self._make_point(5, line=0))
+        tl.add_point(self._make_point(6, line=1))
+        prev = tl.get_previous(2, 0.0)
+        assert prev.value == 5
+
+    def test_get_all_history_returns_all_alive(self):
+        tl = VariableTimeline("x")
+        tl.add_point(self._make_point("a", line=0))
+        tl.add_point(self._make_point("b", line=1))
+        assert len(tl.get_all_history(5, 0.0)) == 2
+
+    def test_no_points_returns_none(self):
+        tl = VariableTimeline("empty")
+        assert tl.get_at_time(0, 0.0) is None
+
+
+# ── RDF built-in constants ────────────────────────────────────────────────────
+
+class TestRDFBuiltinConstants:
+    def test_true_is_python_true(self):
+        assert fresh().get_variable("true") is True
+
+    def test_false_is_python_false(self):
+        assert fresh().get_variable("false") is False
+
+    def test_maybe_is_string(self):
+        assert fresh().get_variable("maybe") == "maybe"
+
+    def test_undefined_is_string(self):
+        assert fresh().get_variable("undefined") == "undefined"
+
+    def test_date_now_is_float(self):
+        assert isinstance(fresh().get_variable("Date.now"), float)
+
+
+# ── Number-word resolution ────────────────────────────────────────────────────
+
+class TestResolveNumberWord:
+    @pytest.mark.parametrize("name,expected", [
+        ("zero", 0),
+        ("one", 1),
+        ("two", 2),
+        ("nine", 9),
+        ("ten", 10),
+        ("eleven", 11),
+        ("nineteen", 19),
+        ("twenty", 20),
+        ("twenty-one", 21),
+        ("thirty-seven", 37),
+        ("ninety-nine", 99),
+        ("one hundred", 100),
+        ("two hundred", 200),
+        ("two hundred thirty-four", 234),
+        ("one thousand", 1_000),
+        ("one thousand two hundred thirty-four", 1_234),
+        ("one million", 1_000_000),
+        ("one billion", 1_000_000_000),
+        ("one trillion", 1_000_000_000_000),
+        ("one million two hundred thirty-four thousand five hundred sixty-seven", 1_234_567),
+    ])
+    def test_known_number_word(self, name, expected):
+        assert resolve_number_word(name) == expected
+
+    @pytest.mark.parametrize("name", ["hello", "not a number", "", "score", "x"])
+    def test_non_number_returns_none(self, name):
+        assert resolve_number_word(name) is None
+
+    def test_rdf_resolves_via_get_variable(self):
+        rdf = fresh()
+        assert rdf.get_variable("one") == 1
+        assert rdf.get_variable("two") == 2
+        assert rdf.get_variable("forty-two") == 42
+        assert rdf.get_variable("one hundred") == 100
+
+    def test_spec_example_one_plus_two(self):
+        rdf = fresh()
+        assert rdf.get_variable("one") + rdf.get_variable("two") == 3
+
+    def test_user_can_override_number_word(self):
+        rdf = fresh()
+        rdf.declare_variable("one", 99, MutabilityFlavor.VAR_VAR)
+        assert rdf.get_variable("one") == 99
+
+
+# ── RDF declare ───────────────────────────────────────────────────────────────
+
+class TestRDFDeclare:
+    def test_stores_and_retrieves_value(self):
+        rdf = fresh()
+        rdf.declare_variable("name", "Luke", MutabilityFlavor.CONST_CONST)
+        assert rdf.get_variable("name") == "Luke"
+
+    def test_const_const_const_is_global(self):
+        rdf1 = fresh()
+        rdf1.declare_variable("pi", 3.14, MutabilityFlavor.CONST_CONST_CONST)
+        rdf2 = fresh()
+        assert rdf2.get_variable("pi") == 3.14
+
+    def test_cannot_redeclare_eternal(self):
+        rdf = fresh()
+        rdf.declare_variable("e", 2.71, MutabilityFlavor.CONST_CONST_CONST)
+        with pytest.raises(RuntimeError, match="eternal"):
+            rdf.declare_variable("e", 9.99, MutabilityFlavor.CONST_CONST)
+
+    def test_overloading_higher_exclamation_wins(self):
+        rdf = fresh()
+        rdf.declare_variable("name", "Lu", MutabilityFlavor.CONST_CONST, exclamation_marks=2)
+        rdf.declare_variable("name", "Luke", MutabilityFlavor.CONST_CONST, exclamation_marks=1)
+        assert rdf.get_variable("name") == "Lu"
+
+    def test_overloading_inverted_exclamation_loses(self):
+        rdf = fresh()
+        rdf.declare_variable("name", "Lu", MutabilityFlavor.CONST_CONST, exclamation_marks=1)
+        rdf.declare_variable("name", "Luke", MutabilityFlavor.CONST_CONST, exclamation_marks=-1)
+        assert rdf.get_variable("name") == "Lu"
+
+    def test_deleted_value_cannot_be_declared(self):
+        rdf = fresh()
+        rdf.delete_entity(3)
+        with pytest.raises(RuntimeError):
+            rdf.declare_variable("x", 3, MutabilityFlavor.CONST_CONST)
+
+    def test_unknown_name_raises_name_error(self):
+        with pytest.raises(NameError):
+            fresh().get_variable("nonexistent_var_xyz")
+
+
+# ── RDF set_variable ──────────────────────────────────────────────────────────
+
+class TestRDFSet:
+    def test_var_var_can_be_reassigned(self):
+        rdf = fresh()
+        rdf.declare_variable("score", 5, MutabilityFlavor.VAR_VAR)
+        rdf.set_variable("score", 6)
+        assert rdf.get_variable("score") == 6
+
+    def test_const_const_cannot_be_reassigned(self):
+        rdf = fresh()
+        rdf.declare_variable("name", "Luke", MutabilityFlavor.CONST_CONST)
+        with pytest.raises(RuntimeError):
+            rdf.set_variable("name", "Lu")
+
+    def test_const_var_cannot_be_reassigned(self):
+        rdf = fresh()
+        rdf.declare_variable("name", "Luke", MutabilityFlavor.CONST_VAR)
+        with pytest.raises(RuntimeError):
+            rdf.set_variable("name", "Lu")
+
+    def test_set_date_now_shifts_clock(self):
+        rdf = fresh()
+        rdf.set_variable("Date.now", 0.0)
+        assert abs(rdf.current_timestamp) < 5.0
+
+
+# ── RDF temporal lookups ──────────────────────────────────────────────────────
+
+class TestRDFTemporalLookup:
+    def test_current_returns_latest_value(self):
+        rdf = fresh()
+        rdf.declare_variable("score", 5, MutabilityFlavor.VAR_VAR)
+        rdf.advance_time()
+        rdf.set_variable("score", 6)
+        assert rdf.get_variable("score", "current") == 6
+
+    def test_previous_returns_prior_value(self):
+        rdf = fresh()
+        rdf.declare_variable("score", 5, MutabilityFlavor.VAR_VAR)
+        rdf.advance_time()
+        rdf.set_variable("score", 6)
+        assert rdf.get_variable("score", "previous") == 5
+
+    def test_next_returns_future_timeline_value(self):
+        rdf = fresh()
+        rdf.declare_variable("score", 5, MutabilityFlavor.VAR_VAR)
+        # Pre-load a future value by moving the cursor forward
+        rdf.current_line = 10
+        rdf.set_variable("score", 99)
+        rdf.current_line = 0
+        assert rdf.get_variable("score", "next") == 99
+
+    def test_negative_lifetime_hoisting_at_boundary(self):
+        rdf = fresh()
+        rdf.current_line = 1
+        rdf.declare_variable("name", "Luke", MutabilityFlavor.CONST_CONST, -1, LifetimeUnit.NEGATIVE_LINES)
+        rdf.current_line = 0
+        assert rdf.get_variable("name") == "Luke"
+
+    def test_negative_lifetime_not_visible_outside_range(self):
+        rdf = fresh()
+        rdf.current_line = 5
+        rdf.declare_variable("name", "Luke", MutabilityFlavor.CONST_CONST, -1, LifetimeUnit.NEGATIVE_LINES)
+        rdf.current_line = 3   # too far before creation
+        with pytest.raises((NameError, RuntimeError)):
+            rdf.get_variable("name")
+
+    def test_lifetime_in_lines_expires(self):
+        rdf = fresh()
+        rdf.declare_variable("temp", "here", MutabilityFlavor.CONST_CONST, 2, LifetimeUnit.LINES)
+        assert rdf.get_variable("temp") == "here"
+        rdf.current_line = 3
+        with pytest.raises(RuntimeError):
+            rdf.get_variable("temp")
+
+
+# ── RDF execution direction ───────────────────────────────────────────────────
+
+class TestRDFExecution:
+    def test_starts_forward(self):
+        assert fresh().execution_direction == 1
+
+    def test_reverse_flips_direction(self):
+        rdf = fresh()
+        rdf.reverse_execution()
+        assert rdf.execution_direction == -1
+
+    def test_double_reverse_restores_forward(self):
+        rdf = fresh()
+        rdf.reverse_execution()
+        rdf.reverse_execution()
+        assert rdf.execution_direction == 1
+
+    def test_advance_respects_direction(self):
+        rdf = fresh()
+        rdf.reverse_execution()
+        rdf.advance_time()
+        assert rdf.current_line == -1
+
+
+# ── RDF delete ────────────────────────────────────────────────────────────────
+
+class TestRDFDelete:
+    def test_delete_primitive(self):
+        rdf = fresh()
+        rdf.delete_entity(3)
+        assert rdf.is_deleted(3)
+
+    def test_delete_variable_removes_from_timelines(self):
+        rdf = fresh()
+        rdf.declare_variable("x", 1, MutabilityFlavor.VAR_VAR)
+        rdf.delete_entity("x")
+        with pytest.raises(NameError):
+            rdf.get_variable("x")
+
+    def test_delete_delete_disables_delete(self):
+        rdf = fresh()
+        rdf.delete_entity("delete")
+        with pytest.raises(RuntimeError, match="deleted"):
+            rdf.delete_entity("something")
+
+
+# ── RDF when observer ─────────────────────────────────────────────────────────
+
+class TestRDFWhenObserver:
+    def test_observer_fires_on_match(self):
+        rdf = fresh()
+        results = []
+        rdf.declare_variable("health", 10, MutabilityFlavor.VAR_VAR)
+        rdf.register_observer("health", 0, lambda: results.append("dead"))
+        rdf.set_variable("health", 5)
+        assert results == []
+        rdf.set_variable("health", 0)
+        assert results == ["dead"]
+
+    def test_observer_does_not_fire_on_mismatch(self):
+        rdf = fresh()
+        results = []
+        rdf.declare_variable("x", 1, MutabilityFlavor.VAR_VAR)
+        rdf.register_observer("x", 99, lambda: results.append("hit"))
+        rdf.set_variable("x", 50)
+        assert results == []
+
+
+# ── RDF signal ────────────────────────────────────────────────────────────────
+
+class TestRDFSignal:
+    def test_initial_value(self):
+        getter, _ = fresh().use_signal(42)
+        assert getter() == 42
+
+    def test_setter_updates_getter(self):
+        getter, setter = fresh().use_signal(0)
+        setter(99)
+        assert getter() == 99
+
+    def test_getter_and_setter_share_state(self):
+        g, s = fresh().use_signal("hello")
+        s("world")
+        assert g() == "world"
+
+
+# ── RDF time ──────────────────────────────────────────────────────────────────
+
+class TestRDFTime:
+    def test_shift_time_increases_timestamp(self):
+        rdf = fresh()
+        before = rdf.current_timestamp
+        rdf.shift_time(1000.0)
+        assert rdf.current_timestamp - before >= 999.9
+
+    def test_shift_time_negative(self):
+        rdf = fresh()
+        rdf.shift_time(100.0)
+        before = rdf.current_timestamp
+        rdf.shift_time(-50.0)
+        assert rdf.current_timestamp < before
+
+
+# ── RDF equality delegation ───────────────────────────────────────────────────
+
+class TestRDFEquality:
+    def test_loose_int_float(self):
+        assert fresh().evaluate_equality(3, 3.14, 0) is True
+
+    def test_double_equal_cross_type(self):
+        assert fresh().evaluate_equality(3.14, "3.14", 1) is True
+
+    def test_triple_equal_different_types(self):
+        assert fresh().evaluate_equality(3.14, "3.14", 2) is False
+
+    def test_quad_equal_same_object(self):
+        s = "hello"
+        assert fresh().evaluate_equality(s, s, 3) is True
+
+    def test_quad_equal_different_objects(self):
+        # Use float() constructor to guarantee two distinct objects at runtime
+        a = float("3.14")
+        b = float("3.14")
+        assert a is not b
+        assert fresh().evaluate_equality(a, b, 3) is False
+
+
+# ── RDF string interpolation delegation ──────────────────────────────────────
+
+class TestRDFStringInterpolation:
+    def test_dollar_interpolation(self):
+        result = fresh().interpolate_string("Hello ${name}!", {"name": "world"})
+        assert result == "Hello world!"
+
+    def test_pound_interpolation(self):
+        result = fresh().interpolate_string("Hello £{name}!", {"name": "GB"})
+        assert result == "Hello GB!"
+
+    def test_euro_suffix_consumed(self):
+        result = fresh().interpolate_string("Hello {name}€ there", {"name": "EU"})
+        assert result == "Hello EU there"
+
+    def test_yen_interpolation(self):
+        result = fresh().interpolate_string("Hello ¥{name}!", {"name": "JP"})
+        assert result == "Hello JP!"
+
+
+# ── evaluate_equality (standalone) ───────────────────────────────────────────
+
+class TestEvaluateEquality:
+    def test_precision_0_loose(self):
+        assert evaluate_equality(3, 3.14, 0) is True
+
+    def test_precision_1_cross_type(self):
+        assert evaluate_equality(3.14, "3.14", 1) is True
+
+    def test_precision_2_string_vs_string(self):
+        assert evaluate_equality("abc", "abc", 2) is True
+
+    def test_precision_3_same_identity(self):
+        obj = object()
+        assert evaluate_equality(obj, obj, 3) is True
+
+    def test_precision_3_different_float_literals(self):
+        # Two float objects with the same value but different identities
+        a = float("3.14")
+        b = float("3.14")
+        assert a is not b
+        assert evaluate_equality(a, b, 3) is False
+
+
+# ── interpolate_string (standalone) ──────────────────────────────────────────
+
+class TestInterpolateString:
+    def test_escudo_nested_property(self):
+        player = {"name": "Lu"}
+        result = interpolate_string("Hello {player$name}!", {"player": player})
+        assert result == "Hello Lu!"
+
+    def test_missing_key_returns_undefined(self):
+        result = interpolate_string("${missing}", {}, "undefined")
+        assert result == "undefined"
+
+
+# ── GOMArray ──────────────────────────────────────────────────────────────────
+
+class TestGOMArray:
+    def test_index_minus_one_is_first(self):
+        assert GOMArray([3, 2, 5])[-1] == 3
+
+    def test_index_zero_is_second(self):
+        assert GOMArray([3, 2, 5])[0] == 2
+
+    def test_index_one_is_third(self):
+        assert GOMArray([3, 2, 5])[1] == 5
+
+    def test_float_insert(self):
+        arr = GOMArray([3, 2, 5])
+        arr[0.5] = 4
+        assert list(arr) == [3, 2, 4, 5]
+
+    def test_repr_contains_class_name(self):
+        assert "GOMArray" in repr(GOMArray([1, 2]))
+
+    def test_out_of_bounds_raises(self):
+        with pytest.raises(IndexError):
+            _ = GOMArray([1, 2])[99]
+
+    def test_set_by_integer_index(self):
+        arr = GOMArray([10, 20, 30])
+        arr[0] = 99
+        assert arr[0] == 99
+
+
+# ── gom_print ─────────────────────────────────────────────────────────────────
+
+class TestGOMPrint:
+    def test_basic_print(self, capsys):
+        gom_print("Hello Gulf")
+        assert "Hello Gulf" in capsys.readouterr().out
+
+    def test_debug_mode_shows_metadata(self, capsys):
+        gom_print("test", exclamation_count=3, debug_mode=True)
+        out = capsys.readouterr().out
+        assert "[DEBUG]" in out
+        assert "correctness=3" in out
+        assert "the interpreter agrees" in out
+
+    def test_debug_mode_uses_engine_line(self, capsys):
+        rdf = fresh()
+        rdf.current_line = 7
+        gom_print("x", exclamation_count=1, debug_mode=True, engine=rdf)
+        out = capsys.readouterr().out
+        assert "line=7" in out
+
+    def test_non_string_value_coerced(self, capsys):
+        gom_print(42)
+        assert "42" in capsys.readouterr().out
+
+
+# ── AI correction passes ──────────────────────────────────────────────────────
+
+class TestAEMI:
+    def test_adds_exclamation_to_unterminated_statement(self):
+        assert aemi('print("hello")').strip().endswith('!')
+
+    def test_leaves_exclamation_terminated_alone(self):
+        assert aemi('print("hello")!').strip() == 'print("hello")!'
+
+    def test_leaves_question_mark_terminated_alone(self):
+        assert aemi('print("hello")?').strip() == 'print("hello")?'
+
+    def test_ignores_comment_lines(self):
+        result = aemi('// just a comment')
+        assert '!' not in result
+
+    def test_ignores_blank_lines(self):
+        assert aemi('').strip() == ''
+
+
+class TestABI:
+    def test_adds_brackets_to_bare_print(self):
+        assert 'print(' in abi('print "hello"')
+
+    def test_leaves_existing_brackets_alone(self):
+        assert abi('print("hello")').strip() == 'print("hello")'
+
+    def test_handles_var_declaration(self):
+        src = 'const const x = 1!'
+        assert abi(src).strip() == src.strip()
+
+
+class TestAQMI:
+    def test_quotes_lowercase_bare_word(self):
+        assert '"hello"' in aqmi('print(hello)')
+
+    def test_leaves_quoted_string_alone(self):
+        assert aqmi('print("world")').strip() == 'print("world")'
+
+    def test_leaves_boolean_keyword_alone(self):
+        assert 'print(true)' in aqmi('print(true)')
+
+    def test_leaves_maybe_alone(self):
+        assert 'print(maybe)' in aqmi('print(maybe)')
+
+
+class TestAI:
+    def test_replaces_unrecognised_line(self):
+        result = ai('completely invalid garbage here')
+        assert 'print("")' in result
+
+    def test_leaves_valid_terminated_statement_alone(self):
+        assert ai('print("hello")!').strip() == 'print("hello")!'
+
+    def test_leaves_file_separator_alone(self):
+        sep = '===================='
+        assert ai(sep).strip() == sep
+
+
+class TestApplyAll:
+    def test_full_pipeline_on_bare_print(self):
+        result = apply_all('print "hello"')
+        assert 'print(' in result
+        assert result.strip().endswith('!')
+
+
+# ── GOMExecutor end-to-end ────────────────────────────────────────────────────
+
+class TestExecutor:
+    def _run(self, stmts):
+        rdf = fresh()
+        GOMExecutor(rdf).execute_program(stmts)
+        return rdf
+
+    def test_declare_and_lookup(self):
+        rdf = self._run([DeclareStmt("x", LiteralExpr(42), MutabilityFlavor.CONST_CONST)])
+        assert rdf.get_variable("x") == 42
+
+    def test_assign_updates_value(self):
+        rdf = self._run([
+            DeclareStmt("x", LiteralExpr(1), MutabilityFlavor.VAR_VAR),
+            AssignStmt("x", LiteralExpr(99)),
+        ])
+        assert rdf.get_variable("x") == 99
+
+    def test_print_statement(self, capsys):
+        self._run([PrintStmt(LiteralExpr("Hello Gulf"), exclamation_count=1)])
+        assert "Hello Gulf" in capsys.readouterr().out
+
+    def test_reverse_flips_engine_direction(self):
+        rdf = self._run([ReverseStmt()])
+        assert rdf.execution_direction == -1
+
+    def test_arithmetic_add(self):
+        rdf = self._run([
+            DeclareStmt("r", ArithmeticExpr(LiteralExpr(3), '+', LiteralExpr(4)),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == 7
+
+    def test_arithmetic_divide_by_zero_returns_undefined(self):
+        rdf = self._run([
+            DeclareStmt("r", ArithmeticExpr(LiteralExpr(3), '/', LiteralExpr(0)),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == "undefined"
+
+    def test_arithmetic_whitespace_precedence_encoded_in_tree(self):
+        # 1 + 2*3 (lower space around * = higher precedence) = 7
+        inner = ArithmeticExpr(LiteralExpr(2), '*', LiteralExpr(3),
+                               left_space=0, right_space=0)
+        outer = ArithmeticExpr(LiteralExpr(1), '+', inner,
+                               left_space=1, right_space=1)
+        rdf = self._run([DeclareStmt("r", outer, MutabilityFlavor.CONST_CONST)])
+        assert rdf.get_variable("r") == 7
+
+    def test_equality_expr(self):
+        rdf = self._run([
+            DeclareStmt("eq",
+                        EqualityExpr(LiteralExpr(3.14), LiteralExpr("3.14"), 1),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("eq") is True
+
+    def test_not_expr_true(self):
+        rdf = self._run([
+            DeclareStmt("r", NotExpr(LiteralExpr(True)), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") is False
+
+    def test_not_maybe_stays_maybe(self):
+        rdf = self._run([
+            DeclareStmt("r", NotExpr(LiteralExpr("maybe")), MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == "maybe"
+
+    def test_delete_stmt(self):
+        rdf = self._run([
+            DeclareStmt("x", LiteralExpr(1), MutabilityFlavor.VAR_VAR),
+            DeleteStmt(LiteralExpr("x")),
+        ])
+        with pytest.raises(NameError):
+            rdf.get_variable("x")
+
+    def test_when_stmt_fires_body(self, capsys):
+        self._run([
+            DeclareStmt("health", LiteralExpr(10), MutabilityFlavor.VAR_VAR),
+            WhenStmt("health", LiteralExpr(0),
+                     [PrintStmt(LiteralExpr("you lose"))]),
+            AssignStmt("health", LiteralExpr(0)),
+        ])
+        assert "you lose" in capsys.readouterr().out
+
+    def test_string_interpolation_in_print(self, capsys):
+        self._run([
+            DeclareStmt("name", LiteralExpr("world"), MutabilityFlavor.CONST_CONST),
+            PrintStmt(StringInterpolationExpr("Hello ${name}!")),
+        ])
+        assert "Hello world!" in capsys.readouterr().out
+
+    def test_negative_lifetime_hoisting(self, capsys):
+        # print(name)! at line 0, const const name<-1> = "Luke"! at line 1
+        # Pre-scan should make name visible at line 0.
+        rdf = fresh()
+        executor = GOMExecutor(rdf)
+        executor.execute_program([
+            PrintStmt(VariableExpr("name")),           # line 0
+            DeclareStmt("name", LiteralExpr("Luke"),   # line 1 with <-1>
+                        MutabilityFlavor.CONST_CONST,
+                        lifetime_value=-1,
+                        lifetime_unit=LifetimeUnit.NEGATIVE_LINES),
+        ])
+        assert "Luke" in capsys.readouterr().out
+
+    def test_temporal_previous_via_executor(self):
+        rdf = self._run([
+            DeclareStmt("score", LiteralExpr(5), MutabilityFlavor.VAR_VAR),
+            AssignStmt("score", LiteralExpr(6)),
+        ])
+        assert rdf.get_variable("score", "current") == 6
+        assert rdf.get_variable("score", "previous") == 5
+
+    def test_number_word_in_arithmetic(self):
+        rdf = self._run([
+            DeclareStmt("r",
+                        ArithmeticExpr(VariableExpr("one"), '+', VariableExpr("two")),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("r") == 3
+
+    def test_number_word_large(self):
+        rdf = self._run([
+            DeclareStmt("big",
+                        VariableExpr("one million"),
+                        MutabilityFlavor.CONST_CONST),
+        ])
+        assert rdf.get_variable("big") == 1_000_000
